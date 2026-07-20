@@ -110,6 +110,7 @@ export async function buildRepertoire(color, settings, opts = {}) {
   let nodesCapped = false;
   let nodesFailed = 0;
   let firstFailureMessage = null;
+  let rootDiagnostic = null;
   const maxNodes = settings.maxNodes || 300;
 
   const baseParams = {
@@ -151,6 +152,22 @@ export async function buildRepertoire(color, settings, opts = {}) {
     const moves = Array.isArray(data.moves) ? data.moves : [];
     const totalGames = moves.reduce((s, m) => s + (m.white || 0) + (m.draws || 0) + (m.black || 0), 0);
     node.games = totalGames;
+
+    if (node === root) {
+      // The single highest-value diagnostic point: the starting position
+      // should always have a huge sample. If it doesn't, something is
+      // wrong with the query itself (bad params, an API behavior change,
+      // an unexpected response shape) rather than genuinely thin data —
+      // capture enough here to tell the difference without live access to
+      // the API ourselves.
+      rootDiagnostic = {
+        totalGames,
+        movesReturned: moves.length,
+        topLevel: { white: data.white, draws: data.draws, black: data.black },
+        query: { since, until, speeds: baseParams.speeds, ratings: baseParams.ratings, variant: baseParams.variant },
+      };
+    }
+
     if (totalGames < settings.minSampleSize || moves.length === 0) {
       return; // not enough data to trust this position further; it's a leaf
     }
@@ -209,6 +226,7 @@ export async function buildRepertoire(color, settings, opts = {}) {
     nodesCapped,
     nodesFailed,
     firstFailureMessage,
+    rootDiagnostic,
     root,
   };
 }

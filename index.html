@@ -204,6 +204,11 @@
         <div class="progressbar" id="build-progress-wrap" style="display:none;"><div id="build-progress-bar"></div></div>
         <div id="build-progress-text" class="hint"></div>
         <div id="build-error" class="errbox" style="display:none;"></div>
+        <div class="toggle-row" style="border-bottom:none;padding-bottom:0;margin-top:10px;">
+          <label style="margin:0;font-size:12.5px;color:var(--muted);">Recent activity</label>
+          <button class="btn secondary" id="copy-log-setup" style="padding:5px 12px;font-size:12px;">Copy log</button>
+        </div>
+        <div class="debug-log" id="debug-log-setup" style="margin-top:6px;"></div>
       </div>
     </section>
 
@@ -271,7 +276,10 @@
       </div>
 
       <div class="card">
-        <h3>Session log</h3>
+        <div class="toggle-row" style="border-bottom:none;padding-bottom:0;">
+          <h3 style="margin:0;">Session log</h3>
+          <button class="btn secondary" id="copy-log-quiz" style="padding:5px 12px;font-size:12px;">Copy log</button>
+        </div>
         <div class="debug-log" id="debug-log-static"></div>
       </div>
     </section>

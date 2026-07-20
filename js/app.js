@@ -13,7 +13,7 @@ import { Chess } from './vendor/chess.esm.js';
 // devtools is actually running the latest code, and it also drives the
 // service worker's cache name (see sw.js) so updates actually take effect
 // instead of being served stale from the offline cache.
-export const APP_VERSION = 11;
+export const APP_VERSION = 12;
 
 const COLOR_OPTIONS = ['white', 'black'];
 const RATING_OPTIONS = ['1000', '1200', '1400', '1600', '1800', '2000', '2200', '2500'];
@@ -30,12 +30,43 @@ const logEntries = [];
 function log(msg) {
   const line = `${new Date().toLocaleTimeString()}  ${msg}`;
   logEntries.push(line);
-  if (logEntries.length > 300) logEntries.shift();
+  if (logEntries.length > 500) logEntries.shift();
   const text = logEntries.slice(-60).join('\n');
-  const el = $('#debug-log-static');
-  if (el) { el.textContent = text; el.scrollTop = el.scrollHeight; }
+  for (const id of ['#debug-log-static', '#debug-log-setup']) {
+    const el = $(id);
+    if (el) { el.textContent = text; el.scrollTop = el.scrollHeight; }
+  }
   const caption = $('#quiz-caption');
   if (caption) caption.textContent = msg;
+}
+
+async function copyLog(button) {
+  const fullText = logEntries.join('\n');
+  const original = button.textContent;
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(fullText);
+    } else {
+      // Fallback for contexts without the async Clipboard API.
+      const ta = document.createElement('textarea');
+      ta.value = fullText;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+    }
+    button.textContent = 'Copied!';
+  } catch (err) {
+    button.textContent = 'Copy failed';
+    console.error('copy log failed', err);
+  }
+  setTimeout(() => { button.textContent = original; }, 1500);
+}
+
+for (const id of ['#copy-log-quiz', '#copy-log-setup']) {
+  $(id)?.addEventListener('click', (e) => copyLog(e.currentTarget));
 }
 
 // ---------- nav ----------
@@ -216,7 +247,12 @@ $('#build-both').addEventListener('click', async () => {
         });
         repertoires[color] = rep;
         saveRepertoire(color, rep);
-        log(`Built ${color} repertoire: ${rep.nodesFetched} positions, window ${windowLabel(rep.monthWindow)}.`);
+        const failNote = rep.nodesFailed ? `, ${rep.nodesFailed} failed (first: ${rep.firstFailureMessage})` : '';
+        log(`Built ${color} repertoire: ${rep.nodesFetched} positions${failNote}, window ${windowLabel(rep.monthWindow)}.`);
+        if (!rep.root.myMove && !rep.root.opponentMoves && rep.rootDiagnostic) {
+          const d = rep.rootDiagnostic;
+          log(`  ${color} root came back empty — totalGames=${d.totalGames}, movesReturned=${d.movesReturned}, topLevel=${JSON.stringify(d.topLevel)}, query=${JSON.stringify(d.query)}`);
+        }
       } catch (err) {
         errBox.style.display = 'block';
         errBox.textContent = `Failed to build ${color} repertoire: ${err.message}`;
