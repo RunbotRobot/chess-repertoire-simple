@@ -95,6 +95,7 @@ export class QuizSession {
    * Returns the outcome of the original attempt.
    */
   async playNextLine() {
+    await this.handlers.onLineStart?.({ color: this.color });
     const result = await this.runPlaythrough(null);
     recordLineResult(this.color, result.pathId || '(root)', result.missed);
     await this.handlers.onLineEnd?.(result);
@@ -112,6 +113,9 @@ export class QuizSession {
 
 /*
 handlers shape:
+  onLineStart({color}) -> Promise<void>                fires once, before a fresh line begins (not before a
+                                                        memorization replay); useful to announce the color
+                                                        when quizzing "both" repertoires in one session
   onOpponentMove({san, fen}) -> Promise<void>         speak the opponent's move, resolve when done
   onAwaitingUserMove({fen, legalMoves, correctSan}) -> Promise<string san>
                                                         listen via voice, resolve with the SAN it matched

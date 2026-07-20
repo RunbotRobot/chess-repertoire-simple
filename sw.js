@@ -1,7 +1,13 @@
 // App-shell cache only. Repertoire data always comes live from the Lichess
 // explorer API — that traffic is never intercepted here, so quizzing always
 // reflects the current rolling window rather than a stale cached snapshot.
-const CACHE = 'opening-drill-v1';
+//
+// The number in CACHE must match APP_VERSION in js/app.js and bump on every
+// deploy that changes any cached file. The browser only re-installs this
+// worker (and thus only re-fetches the shell) when sw.js's own bytes
+// change — if this string doesn't change, updates to app.js/explorer.js/etc.
+// silently never reach clients, no matter how many times they're deployed.
+const CACHE = 'opening-drill-v7';
 const SHELL_FILES = [
   './',
   './index.html',

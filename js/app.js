@@ -9,6 +9,12 @@ import { AnalysisSession } from './analysis.js';
 import * as wakelock from './wakelock.js';
 import { Chess } from './vendor/chess.esm.js';
 
+// Bump this on every deploy — it's the only way to confirm a phone without
+// devtools is actually running the latest code, and it also drives the
+// service worker's cache name (see sw.js) so updates actually take effect
+// instead of being served stale from the offline cache.
+export const APP_VERSION = 7;
+
 const COLOR_OPTIONS = ['white', 'black'];
 const RATING_OPTIONS = ['1000', '1200', '1400', '1600', '1800', '2000', '2200', '2500'];
 const SPEED_OPTIONS = ['bullet', 'blitz', 'rapid', 'classical', 'correspondence'];
@@ -371,16 +377,22 @@ async function enterQuiz() {
 }
 
 $('#start-quiz').addEventListener('click', async () => {
-  const color = quizColorRadios.find((r) => r.checked).value;
-  const rep = repertoires[color];
-  if (!rep || (!rep.root.myMove && !rep.root.opponentMoves)) {
-    $('#quiz-mic-warn').textContent = `No usable ${color} repertoire — build one in Setup first.`;
-    return;
+  const quizMode = quizColorRadios.find((r) => r.checked).value; // 'white' | 'black' | 'both'
+  const colorsNeeded = quizMode === 'both' ? ['white', 'black'] : [quizMode];
+  for (const c of colorsNeeded) {
+    const rep = repertoires[c];
+    if (!rep || (!rep.root.myMove && !rep.root.opponentMoves)) {
+      $('#quiz-mic-warn').textContent = quizMode === 'both'
+        ? `No usable ${c} repertoire — build both colors in Setup first.`
+        : `No usable ${c} repertoire — build one in Setup first.`;
+      return;
+    }
   }
   if (!speech.support.stt) {
     $('#quiz-mic-warn').textContent = 'This browser has no speech recognition support.';
     return;
   }
+  $('#quiz-mic-warn').textContent = '';
 
   quizLive.classList.add('active');
   if (settings.dimScreenDuringQuiz) {
@@ -395,46 +407,46 @@ $('#start-quiz').addEventListener('click', async () => {
   engine = engine || new Engine();
   engine.init().catch((err) => log(`Engine init failed (analysis mode will be unavailable): ${err.message}`));
 
-  const session = new QuizSession({
-    repertoire: rep,
-    settings,
-    color,
-    handlers: {
-      onOpponentMove: async ({ san, fen }) => {
-        currentFen = fen;
-        log(`Opponent plays ${san}`);
-        await speakGuarded(`They play ${sanSpoken(san)}.`);
-      },
-      onAwaitingUserMove: ({ fen, legalMoves }) => {
-        currentFen = fen;
-        pendingLegalMoves = legalMoves;
-        return new Promise((resolve) => {
-          pendingMoveResolve = (san) => resolve(san);
-          if (!quizRunning) resolve(ABORT);
-        });
-      },
-      onResult: async ({ correct, correctSan }) => {
-        if (correct) {
-          log(`Correct: ${correctSan}`);
-        } else {
-          log(`Missed. Correct was ${correctSan}.`);
-          await speakGuarded(`Not quite. The move was ${sanSpoken(correctSan)}.`);
-        }
-      },
-      onLineEnd: async ({ missed }) => {
-        if (!missed) await speakGuarded('Line complete.');
-      },
-      onReplayStart: async () => {
-        await speakGuarded("Let's run through that line again.");
-      },
-      onReplayEnd: async () => {
-        log('Replay complete.');
-      },
+  const handlers = {
+    onLineStart: async ({ color }) => {
+      if (quizMode === 'both') await speakGuarded(color === 'white' ? 'White.' : 'Black.');
     },
-  });
+    onOpponentMove: async ({ san, fen }) => {
+      currentFen = fen;
+      log(`Opponent plays ${san}`);
+      await speakGuarded(`They play ${sanSpoken(san)}.`);
+    },
+    onAwaitingUserMove: ({ fen, legalMoves }) => {
+      currentFen = fen;
+      pendingLegalMoves = legalMoves;
+      return new Promise((resolve) => {
+        pendingMoveResolve = (san) => resolve(san);
+        if (!quizRunning) resolve(ABORT);
+      });
+    },
+    onResult: async ({ correct, correctSan }) => {
+      if (correct) {
+        log(`Correct: ${correctSan}`);
+      } else {
+        log(`Missed. Correct was ${correctSan}.`);
+        await speakGuarded(`Not quite. The move was ${sanSpoken(correctSan)}.`);
+      }
+    },
+    onLineEnd: async ({ missed }) => {
+      if (!missed) await speakGuarded('Line complete.');
+    },
+    onReplayStart: async () => {
+      await speakGuarded("Let's run through that line again.");
+    },
+    onReplayEnd: async () => {
+      log('Replay complete.');
+    },
+  };
 
   try {
     while (quizRunning) {
+      const color = quizMode === 'both' ? (Math.random() < 0.5 ? 'white' : 'black') : quizMode;
+      const session = new QuizSession({ repertoire: repertoires[color], settings, color, handlers });
       await session.playNextLine();
     }
   } catch (err) {
@@ -461,12 +473,24 @@ $('#stop-quiz').addEventListener('click', async () => {
 });
 
 // ---------- init ----------
+$('#app-version').textContent = `v${APP_VERSION}`;
 fillSettingsForm();
 renderRepStatus();
-log('App ready.');
+log(`App ready (v${APP_VERSION}).`);
 
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
     navigator.serviceWorker.register('./sw.js').catch((err) => log(`Service worker registration failed: ${err.message}`));
+  });
+  // A new deploy ships a new sw.js with a new cache name (see APP_VERSION
+  // above); once the browser notices and the new worker takes over, force
+  // a reload so the page itself — not just future fetches — is running the
+  // new code. Without this, a phone with no devtools has no way to tell
+  // it's still running a stale cached version.
+  let reloadedForUpdate = false;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (reloadedForUpdate) return;
+    reloadedForUpdate = true;
+    window.location.reload();
   });
 }

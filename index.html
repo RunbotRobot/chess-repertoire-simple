@@ -23,6 +23,7 @@
   header{display:flex;align-items:center;justify-content:space-between;padding:10px 14px;
     background:var(--panel);border-bottom:1px solid var(--line);flex-shrink:0;}
   header .brand{font-weight:700;font-size:15px;letter-spacing:.2px;}
+  header .brand .version{font-weight:400;font-size:11px;color:var(--muted);margin-left:6px;}
   header .status{font-size:11px;color:var(--muted);}
   nav{display:flex;background:var(--panel);border-bottom:1px solid var(--line);flex-shrink:0;}
   nav button{flex:1;padding:10px;background:none;border:none;color:var(--muted);font-size:13px;
@@ -96,7 +97,7 @@
 <body>
 <div id="app">
   <header>
-    <div class="brand">Opening Drill</div>
+    <div class="brand">Opening Drill<span class="version" id="app-version"></span></div>
     <div class="status" id="header-status">idle</div>
   </header>
   <nav>
@@ -201,6 +202,7 @@
         <div class="row">
           <label class="chip"><input type="radio" name="quiz-color" value="white" checked> White</label>
           <label class="chip"><input type="radio" name="quiz-color" value="black"> Black</label>
+          <label class="chip"><input type="radio" name="quiz-color" value="both"> Both (random each line)</label>
         </div>
         <div class="btn-row">
           <button class="btn btn-block" id="start-quiz">Start quiz</button>
