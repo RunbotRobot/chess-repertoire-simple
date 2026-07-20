@@ -28,12 +28,28 @@ require a real origin).
 
 ## Known platform limits (read before assuming a bug)
 
-- **The window is a calendar month, not a rolling 30 days.** Lichess's
-  explorer API only accepts `since`/`until` as `YYYY-MM`. There's no way to
-  get a true day-by-day rolling window without ingesting and storing raw
-  games ourselves, which isn't practical for a personal app. Instead the
-  repertoire is scoped to the current calendar month and switches over to
-  the next month's data on the 1st — so it changes once a month, not daily.
+- **A Lichess API token is required.** Lichess changed the opening explorer
+  API to require OAuth authentication (`explorer.lichess.org/lichess` now
+  declares `security: OAuth2` and returns 401 without it — this wasn't true
+  when this app was first built). Create a free personal access token at
+  `lichess.org/account/oauth/token/create` (no scopes need to be checked)
+  and paste it into the "Lichess account" field in Setup. A full
+  "Connect to Lichess" OAuth login is possible instead of a pasted token,
+  but is meaningfully more complex (PKCE, redirect handling, token
+  exchange) and untested from this dev environment — ask if you'd rather
+  have that.
+- **The window is the last completed month plus the current one, not a
+  rolling 30 days.** Lichess's explorer API only accepts `since`/`until` as
+  `YYYY-MM`, not a day. It also, in practice, returned zero games when
+  queried as a single month equal to the current, still-in-progress one
+  (`since === until === this month`) — most likely because Lichess hasn't
+  finished indexing an in-progress month yet, possibly compounded by
+  `until` being an exclusive bound (which would make any `since === until`
+  query a permanently empty range, not just for the current month). So
+  `since` is anchored to the previous calendar month and `until` to the
+  current one — always a genuine two-value range, never dependent on the
+  still-accumulating current month having data yet. This still changes
+  exactly once a month, on the 1st, per the original ask.
 - **The screen never actually turns off.** iOS/Android suspend JavaScript
   (and the microphone) the instant the screen truly locks — no web app can
   listen through that. Instead, quiz mode keeps the screen *on* via the Wake

@@ -8,15 +8,23 @@
 //
 // Data-source caveat: Lichess's explorer only filters by month (`since`/`until`
 // are YYYY-MM), not by day. Rather than approximate a rolling 30-day window,
-// the repertoire is simply scoped to the current calendar month and switches
-// over to the next month's data on the 1st — see monthWindow().
-
+// the repertoire is scoped to the last fully-completed month plus whatever's
+// available of the current one, and switches over on the 1st — see
+// monthWindow(). Deliberately NOT since === until === the current month:
+// that returned zero games in practice (confirmed via rootDiagnostic), most
+// likely because Lichess hasn't finished indexing an in-progress month yet
+// — possibly compounded by `until` being an exclusive bound, which would
+// make any since === until query a zero-width, always-empty range. Anchoring
+// `since` to the previous month sidesteps both risks at once: it's always a
+// genuinely non-degenerate two-value range, and it never depends solely on
+// the still-accumulating current month having data yet.
 const EXPLORER_URL = 'https://explorer.lichess.org/lichess';
 
 export function monthWindow() {
   const now = new Date();
-  const m = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}`;
-  return { since: m, until: m };
+  const prev = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1));
+  const fmt = (d) => `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
+  return { since: fmt(prev), until: fmt(now) };
 }
 
 class RateLimiter {
