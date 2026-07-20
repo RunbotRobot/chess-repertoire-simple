@@ -1,0 +1,74 @@
+// Local persistence: settings, cached repertoire trees, per-line mastery stats.
+// Everything lives in localStorage — this app has no backend.
+
+const NS = 'chessrep.';
+
+function readJSON(key, fallback) {
+  try {
+    const raw = localStorage.getItem(NS + key);
+    return raw === null ? fallback : JSON.parse(raw);
+  } catch {
+    return fallback;
+  }
+}
+
+function writeJSON(key, value) {
+  try {
+    localStorage.setItem(NS + key, JSON.stringify(value));
+  } catch (err) {
+    console.error('storage write failed', key, err);
+  }
+}
+
+export const DEFAULT_SETTINGS = {
+  colors: ['white', 'black'],
+  ratingBands: ['1600', '1800', '2000'], // lichess explorer rating buckets to pool together
+  speeds: ['blitz', 'rapid'],
+  minSampleSize: 20,     // a node needs at least this many games to be trusted/expanded
+  maxPlies: 40,          // hard safety cap on repertoire depth (20 full moves)
+  opponentBranchMinShare: 0.05, // ignore opponent replies played less than 5% of the time at a node
+  opponentBranchMinGames: 15,   // ...unless they still clear this absolute game-count floor
+  repertoireMaxAgeHours: 24,    // recompute if the cached tree is older than this
+  alwaysReplayOnSuccess: false, // if true, drill every line twice, not just missed ones
+  dimScreenDuringQuiz: true,
+  voiceURI: null,        // chosen SpeechSynthesis voice, if any
+  speechRate: 0.95,
+};
+
+export function loadSettings() {
+  return { ...DEFAULT_SETTINGS, ...readJSON('settings', {}) };
+}
+
+export function saveSettings(settings) {
+  writeJSON('settings', settings);
+}
+
+// Cached repertoire tree per color: { computedAt, monthWindow: {since, until}, params, root }
+export function loadRepertoire(color) {
+  return readJSON('repertoire.' + color, null);
+}
+
+export function saveRepertoire(color, data) {
+  writeJSON('repertoire.' + color, data);
+}
+
+// Mastery stats keyed by a path id (sequence of UCI moves joined with space).
+export function loadLineStats(color) {
+  return readJSON('linestats.' + color, {});
+}
+
+export function saveLineStats(color, stats) {
+  writeJSON('linestats.' + color, stats);
+}
+
+export function recordLineResult(color, pathId, missed) {
+  const stats = loadLineStats(color);
+  const s = stats[pathId] || { seen: 0, misses: 0, lastResult: null, lastSeenAt: null };
+  s.seen += 1;
+  if (missed) s.misses += 1;
+  s.lastResult = missed ? 'miss' : 'clean';
+  s.lastSeenAt = Date.now();
+  stats[pathId] = s;
+  saveLineStats(color, stats);
+  return s;
+}

@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Opening Drill</title>
+<link rel="icon" type="image/png" href="icon-512.png" />
+<link rel="apple-touch-icon" href="icon-180.png" />
+<link rel="manifest" href="manifest.json" />
+<meta name="theme-color" content="#0f1115" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="Opening Drill" />
+<style>
+  :root{
+    --bg:#0f1115; --panel:#171a21; --panel-2:#1e222b; --ink:#e9ebf0; --muted:#8b93a5;
+    --line:#2a2f3a; --accent:#4f8cff; --good:#3fbf6b; --bad:#e5574b; --warn:#e5b84b;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;}
+  #app{display:flex;flex-direction:column;height:100%;}
+  header{display:flex;align-items:center;justify-content:space-between;padding:10px 14px;
+    background:var(--panel);border-bottom:1px solid var(--line);flex-shrink:0;}
+  header .brand{font-weight:700;font-size:15px;letter-spacing:.2px;}
+  header .status{font-size:11px;color:var(--muted);}
+  nav{display:flex;background:var(--panel);border-bottom:1px solid var(--line);flex-shrink:0;}
+  nav button{flex:1;padding:10px;background:none;border:none;color:var(--muted);font-size:13px;
+    cursor:pointer;border-bottom:2px solid transparent;}
+  nav button.active{color:var(--ink);border-bottom-color:var(--accent);}
+  main{flex:1;overflow-y:auto;min-height:0;}
+  .view{display:none;padding:14px;max-width:640px;margin:0 auto;}
+  .view.active{display:block;}
+
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px;margin-bottom:12px;}
+  .card h3{margin:0 0 10px;font-size:13px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted);}
+  .row{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:8px;}
+  label.chip{display:flex;align-items:center;gap:6px;background:var(--panel-2);border:1px solid var(--line);
+    border-radius:999px;padding:6px 12px;font-size:13px;cursor:pointer;}
+  label.chip input{margin:0;}
+  .field{margin-bottom:12px;}
+  .field label{display:block;font-size:12.5px;color:var(--muted);margin-bottom:4px;}
+  .field input[type=number], .field select{width:100%;padding:8px;background:var(--panel-2);
+    border:1px solid var(--line);border-radius:6px;color:var(--ink);font-size:14px;}
+  .field .hint{font-size:11.5px;color:var(--muted);margin-top:4px;}
+  .toggle-row{display:flex;align-items:center;justify-content:space-between;padding:8px 0;
+    border-bottom:1px solid var(--line);}
+  .toggle-row:last-child{border-bottom:none;}
+  button.btn{background:var(--accent);color:#fff;border:none;border-radius:8px;padding:10px 16px;
+    font-size:14px;cursor:pointer;font-weight:600;}
+  button.btn.secondary{background:var(--panel-2);color:var(--ink);border:1px solid var(--line);}
+  button.btn.danger{background:var(--bad);}
+  button.btn:disabled{opacity:.5;cursor:default;}
+  button.btn-block{width:100%;}
+  .btn-row{display:flex;gap:8px;flex-wrap:wrap;}
+
+  .repcard{display:flex;justify-content:space-between;align-items:center;padding:10px;
+    background:var(--panel-2);border-radius:8px;margin-bottom:8px;font-size:13px;}
+  .repcard .meta{color:var(--muted);font-size:11.5px;}
+  .progressbar{height:6px;background:var(--panel-2);border-radius:4px;overflow:hidden;margin:8px 0;}
+  .progressbar > div{height:100%;background:var(--accent);width:0%;transition:width .2s;}
+  .errbox{background:#3a1c1c;border:1px solid var(--bad);color:#ffb3ab;padding:8px 10px;
+    border-radius:6px;font-size:12.5px;margin-top:8px;white-space:pre-wrap;}
+
+  #board-wrap{max-width:360px;margin:0 auto 10px;}
+  .breadcrumb{font-size:13px;color:var(--muted);margin-bottom:10px;word-break:break-word;}
+  .breadcrumb .san{color:var(--ink);cursor:pointer;text-decoration:underline;}
+  .movelist{display:flex;flex-direction:column;gap:6px;}
+  .movebtn{display:flex;justify-content:space-between;align-items:center;padding:9px 12px;
+    background:var(--panel-2);border:1px solid var(--line);border-radius:8px;color:var(--ink);
+    cursor:pointer;font-size:14px;}
+  .movebtn:hover{border-color:var(--accent);}
+  .movebtn .pct{color:var(--muted);font-size:12px;}
+  .movebtn.mine{border-color:var(--good);}
+
+  #quiz-live{position:fixed;inset:0;background:var(--bg);display:none;flex-direction:column;
+    align-items:center;justify-content:center;z-index:50;transition:opacity .3s;}
+  #quiz-live.active{display:flex;}
+  #quiz-live.blackout{background:#000;}
+  #quiz-live .caption{color:#3a3f4a;font-size:14px;text-align:center;max-width:80vw;
+    transition:color .4s;padding:0 20px;}
+  #quiz-live.blackout.peek .caption{color:var(--ink);}
+  #quiz-live .mode-label{font-size:12px;letter-spacing:1px;text-transform:uppercase;
+    color:#2b2f38;margin-bottom:10px;transition:color .4s;}
+  #quiz-live.blackout.peek .mode-label{color:var(--muted);}
+  #quiz-live .exit-hint{position:absolute;bottom:18px;font-size:11px;color:#22252c;
+    transition:color .4s;}
+  #quiz-live.blackout.peek .exit-hint{color:var(--muted);}
+
+  .debug-log{background:#0a0c10;border:1px solid var(--line);border-radius:6px;padding:8px;
+    font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;color:#9aa4b8;
+    max-height:220px;overflow-y:auto;white-space:pre-wrap;}
+  .voice-support-warn{font-size:12px;color:var(--warn);margin-top:6px;}
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <div class="brand">Opening Drill</div>
+    <div class="status" id="header-status">idle</div>
+  </header>
+  <nav>
+    <button data-view="setup" class="active">Setup</button>
+    <button data-view="browse">Browse</button>
+    <button data-view="quiz">Quiz</button>
+  </nav>
+  <main>
+    <section class="view active" id="view-setup">
+      <div class="card">
+        <h3>Repertoire scope</h3>
+        <div class="field">
+          <label>Colors to prepare</label>
+          <div class="row" id="colors-row"></div>
+        </div>
+        <div class="field">
+          <label>Opponent rating bands (Lichess explorer buckets)</label>
+          <div class="row" id="ratings-row"></div>
+        </div>
+        <div class="field">
+          <label>Time controls</label>
+          <div class="row" id="speeds-row"></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>Scoring &amp; pruning</h3>
+        <div class="field">
+          <label for="minSampleSize">Minimum games to trust a position</label>
+          <input type="number" id="minSampleSize" min="1" step="1">
+          <div class="hint">Below this many games, that branch is treated as untested theory and left out.</div>
+        </div>
+        <div class="field">
+          <label for="opponentBranchMinShare">Opponent reply threshold (% of games)</label>
+          <input type="number" id="opponentBranchMinShare" min="0" max="100" step="1">
+          <div class="hint">Opponent replies below this share are dropped, unless they still clear the game-count floor below.</div>
+        </div>
+        <div class="field">
+          <label for="opponentBranchMinGames">Opponent reply floor (games)</label>
+          <input type="number" id="opponentBranchMinGames" min="0" step="1">
+        </div>
+        <div class="field">
+          <label for="maxPlies">Max depth (half-moves)</label>
+          <input type="number" id="maxPlies" min="2" step="2">
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>Quiz behavior</h3>
+        <div class="toggle-row">
+          <span>Replay every line twice (not just missed ones)</span>
+          <input type="checkbox" id="alwaysReplayOnSuccess">
+        </div>
+        <div class="toggle-row">
+          <span>Dim screen to black during quiz (keeps mic alive)</span>
+          <input type="checkbox" id="dimScreenDuringQuiz">
+        </div>
+        <div class="toggle-row">
+          <span>Show live captions / debug log</span>
+          <input type="checkbox" id="showDebugLog">
+        </div>
+        <div class="field" style="margin-top:10px;">
+          <label for="voiceSelect">Voice</label>
+          <select id="voiceSelect"></select>
+        </div>
+        <div class="field">
+          <label for="speechRate">Speech rate: <span id="speechRateVal"></span></label>
+          <input type="range" id="speechRate" min="0.6" max="1.4" step="0.05" style="width:100%;">
+        </div>
+        <div id="voice-support-warn" class="voice-support-warn"></div>
+      </div>
+
+      <div class="btn-row" style="margin-bottom:12px;">
+        <button class="btn" id="save-settings">Save settings</button>
+        <button class="btn secondary" id="build-both">Build / refresh repertoires</button>
+      </div>
+
+      <div class="card" id="repertoire-status">
+        <h3>Repertoire status</h3>
+        <div id="rep-cards"></div>
+        <div class="progressbar" id="build-progress-wrap" style="display:none;"><div id="build-progress-bar"></div></div>
+        <div id="build-progress-text" class="hint"></div>
+        <div id="build-error" class="errbox" style="display:none;"></div>
+      </div>
+    </section>
+
+    <section class="view" id="view-browse">
+      <div class="card">
+        <div class="row">
+          <label class="chip"><input type="radio" name="browse-color" value="white" checked> White repertoire</label>
+          <label class="chip"><input type="radio" name="browse-color" value="black"> Black repertoire</label>
+        </div>
+        <div id="board-wrap"></div>
+        <div class="breadcrumb" id="browse-breadcrumb"></div>
+        <div class="movelist" id="browse-movelist"></div>
+      </div>
+    </section>
+
+    <section class="view" id="view-quiz">
+      <div class="card">
+        <h3>Session</h3>
+        <div class="row">
+          <label class="chip"><input type="radio" name="quiz-color" value="white" checked> White</label>
+          <label class="chip"><input type="radio" name="quiz-color" value="black"> Black</label>
+        </div>
+        <div class="btn-row">
+          <button class="btn btn-block" id="start-quiz">Start quiz</button>
+        </div>
+        <div class="hint" style="margin-top:8px;">
+          Say <strong>"Analyze"</strong> any time during the quiz to pause and ask the engine about the position.
+          Say <strong>"Quiz"</strong> to resume. The screen will go black and stay awake — tap it to peek at the caption log.
+        </div>
+        <div id="quiz-mic-warn" class="voice-support-warn"></div>
+      </div>
+      <div class="card">
+        <h3>Session log</h3>
+        <div class="debug-log" id="debug-log-static"></div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<div id="quiz-live">
+  <div class="mode-label" id="quiz-mode-label">Quiz</div>
+  <div class="caption" id="quiz-caption">Listening…</div>
+  <div class="exit-hint">tap to peek · press stop below to end</div>
+  <button class="btn danger" id="stop-quiz" style="position:absolute;bottom:44px;">Stop quiz</button>
+</div>
+
+<script type="module" src="js/app.js"></script>
+</body>
+</html>

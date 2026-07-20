@@ -1,0 +1,20 @@
+{
+  "name": "Opening Drill",
+  "short_name": "Opening Drill",
+  "display": "standalone",
+  "start_url": ".",
+  "background_color": "#0f1115",
+  "theme_color": "#0f1115",
+  "icons": [
+    {
+      "src": "icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    },
+    {
+      "src": "icon-180.png",
+      "sizes": "180x180",
+      "type": "image/png"
+    }
+  ]
+}
