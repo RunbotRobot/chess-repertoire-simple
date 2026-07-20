@@ -13,7 +13,7 @@ import { Chess } from './vendor/chess.esm.js';
 // devtools is actually running the latest code, and it also drives the
 // service worker's cache name (see sw.js) so updates actually take effect
 // instead of being served stale from the offline cache.
-export const APP_VERSION = 10;
+export const APP_VERSION = 11;
 
 const COLOR_OPTIONS = ['white', 'black'];
 const RATING_OPTIONS = ['1000', '1200', '1400', '1600', '1800', '2000', '2200', '2500'];
@@ -176,6 +176,7 @@ function windowLabel(monthWindow) {
 $('#build-both').addEventListener('click', async () => {
   settings = readSettingsForm();
   saveSettings(settings);
+  const buildBtn = $('#build-both');
   const progressWrap = $('#build-progress-wrap');
   const progressBar = $('#build-progress-bar');
   const progressText = $('#build-progress-text');
@@ -188,31 +189,48 @@ $('#build-both').addEventListener('click', async () => {
     return;
   }
 
+  // Fetches happen off-screen at the bottom of a long settings page, so
+  // clicking Build gave no feedback near the button itself — it just looked
+  // frozen. Disable the button, scroll the status card into view, and show
+  // motion immediately (before the first position even comes back) instead
+  // of a static 0% bar.
+  buildBtn.disabled = true;
+  const originalBtnLabel = buildBtn.textContent;
+  buildBtn.textContent = 'Building…';
   progressWrap.style.display = 'block';
+  progressWrap.classList.add('indeterminate');
+  $('#repertoire-status').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 
-  for (const color of settings.colors) {
-    progressText.textContent = `Building ${color} repertoire…`;
-    progressBar.style.width = '0%';
-    try {
-      const rep = await buildRepertoire(color, settings, {
-        onProgress: ({ nodesFetched }) => {
-          const pct = Math.min(100, Math.round((nodesFetched / (settings.maxNodes || 300)) * 100));
-          progressBar.style.width = pct + '%';
-          progressText.textContent = `Building ${color} repertoire… ${nodesFetched} positions fetched`;
-        },
-      });
-      repertoires[color] = rep;
-      saveRepertoire(color, rep);
-      log(`Built ${color} repertoire: ${rep.nodesFetched} positions, window ${windowLabel(rep.monthWindow)}.`);
-    } catch (err) {
-      errBox.style.display = 'block';
-      errBox.textContent = `Failed to build ${color} repertoire: ${err.message}`;
-      log(`ERROR building ${color}: ${err.message}`);
+  try {
+    for (const color of settings.colors) {
+      progressText.textContent = `Building ${color} repertoire…`;
+      progressBar.style.width = '0%';
+      try {
+        const rep = await buildRepertoire(color, settings, {
+          onProgress: ({ nodesFetched }) => {
+            progressWrap.classList.remove('indeterminate'); // first position landed — switch to a real percentage
+            const pct = Math.min(100, Math.round((nodesFetched / (settings.maxNodes || 300)) * 100));
+            progressBar.style.width = pct + '%';
+            progressText.textContent = `Building ${color} repertoire… ${nodesFetched} positions fetched`;
+          },
+        });
+        repertoires[color] = rep;
+        saveRepertoire(color, rep);
+        log(`Built ${color} repertoire: ${rep.nodesFetched} positions, window ${windowLabel(rep.monthWindow)}.`);
+      } catch (err) {
+        errBox.style.display = 'block';
+        errBox.textContent = `Failed to build ${color} repertoire: ${err.message}`;
+        log(`ERROR building ${color}: ${err.message}`);
+      }
     }
+  } finally {
+    progressWrap.style.display = 'none';
+    progressWrap.classList.remove('indeterminate');
+    progressText.textContent = '';
+    buildBtn.disabled = false;
+    buildBtn.textContent = originalBtnLabel;
+    renderRepStatus();
   }
-  progressWrap.style.display = 'none';
-  progressText.textContent = '';
-  renderRepStatus();
 });
 
 // ---------- browse view ----------
