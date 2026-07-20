@@ -58,7 +58,16 @@ async function fetchExplorerRaw(params, { signal } = {}) {
   }
   let attempt = 0;
   for (;;) {
-    const res = await fetch(url, { signal });
+    let res;
+    try {
+      res = await fetch(url, { signal });
+    } catch (err) {
+      // fetch() throws an opaque TypeError for network failures *and* for
+      // CORS rejections alike — the browser deliberately hides the real
+      // reason from JS. Check the browser console (not this message) for
+      // the actual "blocked by CORS policy" / DNS / offline detail.
+      throw new Error(`Could not reach the Lichess explorer (${err.message}). Check the browser console for the real cause — this could be blocked by CORS, offline, or an ad/privacy blocker. URL: ${url}`);
+    }
     if (res.status === 429) {
       attempt++;
       if (attempt > 5) throw new Error('Lichess explorer rate-limited us repeatedly (429).');
@@ -66,13 +75,17 @@ async function fetchExplorerRaw(params, { signal } = {}) {
       continue;
     }
     if (!res.ok) {
-      throw new Error(`Lichess explorer request failed: HTTP ${res.status}`);
+      throw new Error(`Lichess explorer request failed: HTTP ${res.status} for ${url}`);
     }
     const text = await res.text();
     // The endpoint returns a single JSON object for position queries; guard
     // against stray newline-delimited framing just in case.
     const line = text.trim().split('\n')[0];
-    return JSON.parse(line);
+    try {
+      return JSON.parse(line);
+    } catch (err) {
+      throw new Error(`Lichess explorer returned unparseable data: ${err.message}. First 200 chars: ${text.slice(0, 200)}`);
+    }
   }
 }
 
@@ -87,6 +100,8 @@ export async function buildRepertoire(color, settings, opts = {}) {
   const limiter = new RateLimiter(4, 60);
   let nodesFetched = 0;
   let nodesCapped = false;
+  let nodesFailed = 0;
+  let firstFailureMessage = null;
   const maxNodes = settings.maxNodes || 300;
 
   const baseParams = {
@@ -118,6 +133,8 @@ export async function buildRepertoire(color, settings, opts = {}) {
       data = await fetchNode(uciPath);
     } catch (err) {
       node.fetchError = String(err.message || err);
+      nodesFailed++;
+      firstFailureMessage ??= node.fetchError;
       return;
     }
     nodesFetched++;
@@ -169,6 +186,12 @@ export async function buildRepertoire(color, settings, opts = {}) {
 
   await expand(root, []);
 
+  if (nodesFetched === 0 && root.fetchError) {
+    // A failure at the root means nothing at all was fetched — surface it
+    // as a real error instead of silently returning a hollow, empty tree.
+    throw new Error(root.fetchError);
+  }
+
   return {
     color,
     computedAt: Date.now(),
@@ -176,6 +199,8 @@ export async function buildRepertoire(color, settings, opts = {}) {
     params: { ...baseParams, moves: undefined },
     nodesFetched,
     nodesCapped,
+    nodesFailed,
+    firstFailureMessage,
     root,
   };
 }

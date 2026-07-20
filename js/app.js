@@ -137,7 +137,8 @@ function renderRepStatus() {
     } else {
       const stale = isStale(rep, settings.repertoireMaxAgeHours);
       const lines = countLines(rep.root);
-      div.innerHTML = `<span>${cap(color)}: ${lines} line(s), ${rep.nodesFetched} positions fetched${rep.nodesCapped ? ' (capped)' : ''}</span>
+      const failNote = rep.nodesFailed ? ` — ${rep.nodesFailed} position(s) failed to fetch` : '';
+      div.innerHTML = `<span>${cap(color)}: ${lines} line(s), ${rep.nodesFetched} positions fetched${rep.nodesCapped ? ' (capped)' : ''}${failNote}</span>
         <span class="meta">${stale ? 'stale — ' : ''}window ${windowLabel(rep.monthWindow)}</span>`;
     }
     wrap.appendChild(div);
