@@ -41,7 +41,7 @@
   label.chip input{margin:0;}
   .field{margin-bottom:12px;}
   .field label{display:block;font-size:12.5px;color:var(--muted);margin-bottom:4px;}
-  .field input[type=number], .field select{width:100%;padding:8px;background:var(--panel-2);
+  .field input[type=number], .field input[type=text], .field select{width:100%;padding:8px;background:var(--panel-2);
     border:1px solid var(--line);border-radius:6px;color:var(--ink);font-size:14px;}
   .field .hint{font-size:11.5px;color:var(--muted);margin-top:4px;}
   .toggle-row{display:flex;align-items:center;justify-content:space-between;padding:8px 0;
@@ -73,6 +73,8 @@
   .movebtn:hover{border-color:var(--accent);}
   .movebtn .pct{color:var(--muted);font-size:12px;}
   .movebtn.mine{border-color:var(--good);}
+  .movebtn.correct{border-color:var(--good);background:#173824;}
+  .movebtn.incorrect{border-color:var(--bad);background:#3a1c1c;}
 
   #quiz-live{position:fixed;inset:0;background:var(--bg);display:none;flex-direction:column;
     align-items:center;justify-content:center;z-index:50;transition:opacity .3s;}
@@ -204,15 +206,49 @@
           <label class="chip"><input type="radio" name="quiz-color" value="black"> Black</label>
           <label class="chip"><input type="radio" name="quiz-color" value="both"> Both (random each line)</label>
         </div>
+        <div class="row">
+          <label class="chip"><input type="radio" name="quiz-input" value="voice" checked> Voice, screen off</label>
+          <label class="chip"><input type="radio" name="quiz-input" value="manual"> Manual, on-screen — no audio</label>
+        </div>
         <div class="btn-row">
           <button class="btn btn-block" id="start-quiz">Start quiz</button>
         </div>
-        <div class="hint" style="margin-top:8px;">
+        <div class="hint" id="quiz-input-hint" style="margin-top:8px;">
           Say <strong>"Analyze"</strong> any time during the quiz to pause and ask the engine about the position.
           Say <strong>"Quiz"</strong> to resume. The screen will go black and stay awake — tap it to peek at the caption log.
         </div>
         <div id="quiz-mic-warn" class="voice-support-warn"></div>
       </div>
+
+      <div class="card" id="manual-quiz-panel" style="display:none;">
+        <h3>Quiz</h3>
+        <div id="manual-board-wrap" style="max-width:320px;margin:0 auto 10px;"></div>
+        <div class="hint" id="manual-status">—</div>
+        <div class="movelist" id="manual-movelist" style="margin-top:10px;"></div>
+
+        <div id="manual-analysis-panel" style="display:none;margin-top:10px;padding-top:10px;border-top:1px solid var(--line);">
+          <div class="row">
+            <button class="btn secondary" data-q="best">Best move</button>
+            <button class="btn secondary" data-q="eval">Eval</button>
+            <button class="btn secondary" data-q="threat">Threat</button>
+            <button class="btn secondary" data-q="line">Line</button>
+          </div>
+          <div class="field" style="margin-top:8px;">
+            <input type="text" id="manual-question-input" placeholder="Or ask your own question…">
+          </div>
+          <div class="btn-row">
+            <button class="btn" id="manual-ask-btn">Ask</button>
+            <button class="btn secondary" id="manual-resume-btn">Resume quiz</button>
+          </div>
+          <div class="debug-log" id="manual-answer" style="margin-top:8px;min-height:2.5em;"></div>
+        </div>
+
+        <div class="btn-row" style="margin-top:10px;">
+          <button class="btn secondary" id="manual-analyze-btn">Analyze</button>
+          <button class="btn danger" id="manual-stop-btn">Stop quiz</button>
+        </div>
+      </div>
+
       <div class="card">
         <h3>Session log</h3>
         <div class="debug-log" id="debug-log-static"></div>

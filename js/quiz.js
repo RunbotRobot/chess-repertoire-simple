@@ -59,7 +59,7 @@ export class QuizSession {
         const moveResult = applyUci(chess, chosen.uci);
         if (!moveResult) break; // shouldn't happen; defends against a corrupt tree
         attemptPath.push({ uci: chosen.uci, san: chosen.san, mover: 'opponent' });
-        await this.handlers.onOpponentMove?.({ san: chosen.san, fen: chess.fen() });
+        await this.handlers.onOpponentMove?.({ san: chosen.san, uci: chosen.uci, fen: chess.fen() });
         node = node.children[chosen.uci];
         idx++;
         continue;
@@ -74,13 +74,20 @@ export class QuizSession {
 
       if (userSan === ABORT) throw new QuizAbort();
       const correct = userSan === node.myMove.san;
-      await this.handlers.onResult?.({ correct, correctSan: node.myMove.san, userSan });
+
+      if (correct) applyUci(chess, node.myMove.uci);
+      await this.handlers.onResult?.({
+        correct,
+        correctSan: node.myMove.san,
+        correctUci: node.myMove.uci,
+        userSan,
+        fen: chess.fen(), // post-move fen when correct; unchanged (pre-move) fen on a miss
+      });
 
       if (!correct) {
         missed = true;
         break;
       }
-      applyUci(chess, node.myMove.uci);
       attemptPath.push({ uci: node.myMove.uci, san: node.myMove.san, mover: 'me' });
       node = node.children[node.myMove.uci];
       idx++;
@@ -116,11 +123,17 @@ handlers shape:
   onLineStart({color}) -> Promise<void>                fires once, before a fresh line begins (not before a
                                                         memorization replay); useful to announce the color
                                                         when quizzing "both" repertoires in one session
-  onOpponentMove({san, fen}) -> Promise<void>         speak the opponent's move, resolve when done
+  onOpponentMove({san, uci, fen}) -> Promise<void>    announce the opponent's move (voice) or render it
+                                                        (board/text), resolve when done. fen is the position
+                                                        after this move; uci is handy for board highlighting.
   onAwaitingUserMove({fen, legalMoves, correctSan}) -> Promise<string san>
-                                                        listen via voice, resolve with the SAN it matched
-                                                        (or a value that won't match correctSan, e.g. '', on timeout/giveup)
-  onResult({correct, correctSan, userSan}) -> Promise<void>   confirm / reveal correct move by voice
+                                                        collect the user's move (voice or on-screen), resolve
+                                                        with the SAN it matched (or a value that won't match
+                                                        correctSan, e.g. '', on timeout/giveup)
+  onResult({correct, correctSan, correctUci, userSan, fen}) -> Promise<void>
+                                                        confirm / reveal the correct move. fen reflects the
+                                                        position after the move when correct, or is unchanged
+                                                        (pre-move) on a miss, so a board can be kept in sync.
   onLineEnd({missed, attemptPath}) -> Promise<void>
   onReplayStart(attemptPath) -> Promise<void>
   onReplayEnd({missed, attemptPath}) -> Promise<void>

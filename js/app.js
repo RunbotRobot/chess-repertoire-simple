@@ -13,7 +13,7 @@ import { Chess } from './vendor/chess.esm.js';
 // devtools is actually running the latest code, and it also drives the
 // service worker's cache name (see sw.js) so updates actually take effect
 // instead of being served stale from the offline cache.
-export const APP_VERSION = 7;
+export const APP_VERSION = 8;
 
 const COLOR_OPTIONS = ['white', 'black'];
 const RATING_OPTIONS = ['1000', '1200', '1400', '1600', '1800', '2000', '2200', '2500'];
@@ -281,8 +281,18 @@ function renderBrowse() {
 
 // ---------- quiz + analysis ----------
 const quizColorRadios = $$('input[name=quiz-color]');
+const quizInputRadios = $$('input[name=quiz-input]');
 const quizLive = $('#quiz-live');
 const quizModeLabel = $('#quiz-mode-label');
+
+function updateQuizInputHint() {
+  const val = quizInputRadios.find((r) => r.checked).value;
+  $('#quiz-input-hint').textContent = val === 'manual'
+    ? 'Tap a move to answer. Tap "Analyze" any time to check the engine\'s opinion on the position without leaving the quiz — no mic or speaker involved.'
+    : 'Say "Analyze" any time during the quiz to pause and ask the engine about the position. Say "Quiz" to resume. The screen will go black and stay awake — tap it to peek at the caption log.';
+}
+quizInputRadios.forEach((r) => r.addEventListener('change', updateQuizInputHint));
+updateQuizInputHint();
 
 let mode = 'idle'; // 'idle' | 'quiz' | 'analysis'
 let listenHandle = null;
@@ -378,6 +388,7 @@ async function enterQuiz() {
 
 $('#start-quiz').addEventListener('click', async () => {
   const quizMode = quizColorRadios.find((r) => r.checked).value; // 'white' | 'black' | 'both'
+  const inputMethod = quizInputRadios.find((r) => r.checked).value; // 'voice' | 'manual'
   const colorsNeeded = quizMode === 'both' ? ['white', 'black'] : [quizMode];
   for (const c of colorsNeeded) {
     const rep = repertoires[c];
@@ -388,12 +399,22 @@ $('#start-quiz').addEventListener('click', async () => {
       return;
     }
   }
+
+  if (inputMethod === 'manual') {
+    $('#quiz-mic-warn').textContent = '';
+    await startManualQuiz(quizMode);
+    return;
+  }
+
   if (!speech.support.stt) {
-    $('#quiz-mic-warn').textContent = 'This browser has no speech recognition support.';
+    $('#quiz-mic-warn').textContent = 'This browser has no speech recognition support — switch to Manual mode above.';
     return;
   }
   $('#quiz-mic-warn').textContent = '';
+  await startVoiceQuiz(quizMode);
+});
 
+async function startVoiceQuiz(quizMode) {
   quizLive.classList.add('active');
   if (settings.dimScreenDuringQuiz) {
     quizLive.classList.add('blackout');
@@ -455,7 +476,7 @@ $('#start-quiz').addEventListener('click', async () => {
       console.error(err);
     }
   }
-});
+}
 
 function sanSpoken(san) {
   return sanToSpeech(san);
@@ -470,6 +491,140 @@ $('#stop-quiz').addEventListener('click', async () => {
   await wakelock.disableBlackout(quizLive);
   mode = 'idle';
   log('Quiz stopped.');
+});
+
+// ---------- manual (no-audio) quiz ----------
+// Full functionality without audio: opponent moves render on the board and
+// as text instead of being spoken, and the user answers by tapping a legal
+// move instead of speaking one. Analysis mode becomes a tap-to-ask panel
+// (quick-question buttons plus free text) with a text answer, no mic or TTS
+// anywhere in the loop. Shares the same QuizSession/Engine/AnalysisSession
+// as voice mode — only the handlers differ.
+let manualRunning = false;
+let manualPendingResolve = null;
+let manualCurrentFen = new Chess().fen();
+let manualOrientation = 'white';
+
+function renderManualBoard(fen, lastMove) {
+  renderBoard($('#manual-board-wrap'), fen, { orientation: manualOrientation, lastMove });
+}
+
+function renderManualMoveList(legalMoves) {
+  const wrap = $('#manual-movelist');
+  wrap.innerHTML = '';
+  for (const m of legalMoves) {
+    const btn = document.createElement('button');
+    btn.className = 'movebtn';
+    btn.textContent = m.san;
+    btn.addEventListener('click', () => {
+      if (!manualPendingResolve) return;
+      const resolve = manualPendingResolve;
+      manualPendingResolve = null;
+      wrap.innerHTML = '';
+      resolve(m.san);
+    });
+    wrap.appendChild(btn);
+  }
+}
+
+async function startManualQuiz(quizMode) {
+  manualRunning = true;
+  $('#manual-quiz-panel').style.display = 'block';
+  $('#manual-analysis-panel').style.display = 'none';
+  $('#manual-status').textContent = 'Starting…';
+  $('#manual-movelist').innerHTML = '';
+  engine = engine || new Engine();
+  if (!analysisSession) analysisSession = new AnalysisSession(engine);
+  engine.init().catch((err) => log(`Engine init failed (analysis will be unavailable): ${err.message}`));
+
+  const handlers = {
+    onLineStart: async ({ color }) => {
+      manualOrientation = color;
+      $('#manual-status').textContent = quizMode === 'both' ? `New line — ${cap(color)} to move first.` : 'New line.';
+    },
+    onOpponentMove: async ({ san, uci, fen }) => {
+      manualCurrentFen = fen;
+      renderManualBoard(fen, { from: uci.slice(0, 2), to: uci.slice(2, 4) });
+      $('#manual-status').textContent = `Opponent played ${san}. Your move.`;
+      $('#manual-movelist').innerHTML = '';
+    },
+    onAwaitingUserMove: ({ fen, legalMoves }) => {
+      manualCurrentFen = fen;
+      renderManualMoveList(legalMoves);
+      return new Promise((resolve) => {
+        manualPendingResolve = (san) => resolve(san);
+        if (!manualRunning) resolve(ABORT);
+      });
+    },
+    onResult: async ({ correct, correctSan, correctUci, fen }) => {
+      manualCurrentFen = fen;
+      if (correct) {
+        renderManualBoard(fen, { from: correctUci.slice(0, 2), to: correctUci.slice(2, 4) });
+        $('#manual-status').textContent = `Correct — ${correctSan}.`;
+      } else {
+        $('#manual-status').textContent = `Not quite. The move was ${correctSan}.`;
+      }
+      $('#manual-movelist').innerHTML = '';
+    },
+    onLineEnd: async ({ missed }) => {
+      if (!missed) $('#manual-status').textContent = 'Line complete.';
+    },
+    onReplayStart: async () => {
+      $('#manual-status').textContent = "Replaying that line for memorization…";
+    },
+    onReplayEnd: async () => {},
+  };
+
+  try {
+    while (manualRunning) {
+      const color = quizMode === 'both' ? (Math.random() < 0.5 ? 'white' : 'black') : quizMode;
+      const session = new QuizSession({ repertoire: repertoires[color], settings, color, handlers });
+      await session.playNextLine();
+    }
+  } catch (err) {
+    if (!(err instanceof QuizAbort)) {
+      log(`Quiz error: ${err.message}`);
+      console.error(err);
+    }
+  }
+}
+
+$('#manual-stop-btn').addEventListener('click', () => {
+  manualRunning = false;
+  if (manualPendingResolve) { const r = manualPendingResolve; manualPendingResolve = null; r(ABORT); }
+  $('#manual-quiz-panel').style.display = 'none';
+  $('#manual-analysis-panel').style.display = 'none';
+  $('#manual-movelist').innerHTML = '';
+  log('Quiz stopped.');
+});
+
+$('#manual-analyze-btn').addEventListener('click', () => {
+  $('#manual-analysis-panel').style.display = 'block';
+  $('#manual-answer').textContent = '';
+});
+
+$('#manual-resume-btn').addEventListener('click', () => {
+  $('#manual-analysis-panel').style.display = 'none';
+});
+
+async function manualAsk(questionText) {
+  if (!analysisSession) return;
+  $('#manual-answer').textContent = 'Thinking…';
+  try {
+    const answer = await analysisSession.answer(questionText, manualCurrentFen);
+    $('#manual-answer').textContent = answer;
+  } catch (err) {
+    $('#manual-answer').textContent = `Error: ${err.message}`;
+  }
+}
+
+$$('#manual-analysis-panel [data-q]').forEach((btn) => {
+  const canned = { best: 'best move', eval: "what's the eval", threat: "what's the threat", line: 'give me a line' };
+  btn.addEventListener('click', () => manualAsk(canned[btn.dataset.q]));
+});
+$('#manual-ask-btn').addEventListener('click', () => {
+  const q = $('#manual-question-input').value.trim();
+  if (q) manualAsk(q);
 });
 
 // ---------- init ----------
@@ -487,8 +642,16 @@ if ('serviceWorker' in navigator) {
   // a reload so the page itself — not just future fetches — is running the
   // new code. Without this, a phone with no devtools has no way to tell
   // it's still running a stale cached version.
+  //
+  // clients.claim() in sw.js also fires this same event on a first-ever
+  // visit (no controller -> first controller), which is not an update and
+  // must NOT trigger a reload — that would silently reload the page out
+  // from under whatever the user was doing moments after every fresh load.
+  // Only reload once an *existing* controller is replaced by a new one.
+  let hadController = !!navigator.serviceWorker.controller;
   let reloadedForUpdate = false;
   navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (!hadController) { hadController = true; return; }
     if (reloadedForUpdate) return;
     reloadedForUpdate = true;
     window.location.reload();
