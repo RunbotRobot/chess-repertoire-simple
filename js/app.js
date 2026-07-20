@@ -13,7 +13,7 @@ import { Chess } from './vendor/chess.esm.js';
 // devtools is actually running the latest code, and it also drives the
 // service worker's cache name (see sw.js) so updates actually take effect
 // instead of being served stale from the offline cache.
-export const APP_VERSION = 13;
+export const APP_VERSION = 14;
 
 const COLOR_OPTIONS = ['white', 'black'];
 const RATING_OPTIONS = ['1000', '1200', '1400', '1600', '1800', '2000', '2200', '2500'];
@@ -251,7 +251,7 @@ $('#build-both').addEventListener('click', async () => {
         log(`Built ${color} repertoire: ${rep.nodesFetched} positions${failNote}, window ${windowLabel(rep.monthWindow)}.`);
         if (!rep.root.myMove && !rep.root.opponentMoves && rep.rootDiagnostic) {
           const d = rep.rootDiagnostic;
-          log(`  ${color} root came back empty — totalGames=${d.totalGames}, movesReturned=${d.movesReturned}, topLevel=${JSON.stringify(d.topLevel)}, query=${JSON.stringify(d.query)}`);
+          log(`  ${color} root came back empty — totalGames=${d.totalGames}, movesReturned=${d.movesReturned}, topLevel=${JSON.stringify(d.topLevel)}, url=${d.url}`);
         }
       } catch (err) {
         errBox.style.display = 'block';

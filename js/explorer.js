@@ -59,11 +59,15 @@ class RateLimiter {
   }
 }
 
-async function fetchExplorerRaw(params, { signal, token } = {}) {
+function buildExplorerUrl(params) {
   const url = new URL(EXPLORER_URL);
   for (const [k, v] of Object.entries(params)) {
     if (v !== undefined && v !== null && v !== '') url.searchParams.set(k, v);
   }
+  return url;
+}
+
+async function fetchExplorerRaw(url, { signal, token } = {}) {
   const headers = token ? { Authorization: `Bearer ${token}` } : undefined;
   let attempt = 0;
   for (;;) {
@@ -128,14 +132,16 @@ export async function buildRepertoire(color, settings, opts = {}) {
     since,
     until,
     moves: 12, // ask lichess for up to 12 candidate moves per position
-    topGames: 0,
-    recentGames: 0,
+    // topGames/recentGames deliberately omitted (left at Lichess's default)
+    // rather than forced to 0 — we never read that data, so there's no
+    // reason to send a non-default value that could interact oddly with a
+    // recently-changed, newly-authenticated endpoint.
   };
 
   async function fetchNode(uciPath) {
-    return limiter.run(() =>
-      fetchExplorerRaw({ ...baseParams, play: uciPath.join(',') }, { signal: opts.signal, token: settings.lichessToken })
-    );
+    const url = buildExplorerUrl({ ...baseParams, play: uciPath.join(',') });
+    const data = await limiter.run(() => fetchExplorerRaw(url, { signal: opts.signal, token: settings.lichessToken }));
+    return { data, url };
   }
 
   const root = { uci: null, san: null, ply: 0, games: 0, myMove: null, opponentMoves: null, children: {} };
@@ -145,9 +151,9 @@ export async function buildRepertoire(color, settings, opts = {}) {
     if (nodesFetched >= maxNodes) { nodesCapped = true; return; }
     if (node.ply >= settings.maxPlies) return;
 
-    let data;
+    let data, url;
     try {
-      data = await fetchNode(uciPath);
+      ({ data, url } = await fetchNode(uciPath));
     } catch (err) {
       node.fetchError = String(err.message || err);
       nodesFailed++;
@@ -172,7 +178,7 @@ export async function buildRepertoire(color, settings, opts = {}) {
         totalGames,
         movesReturned: moves.length,
         topLevel: { white: data.white, draws: data.draws, black: data.black },
-        query: { since, until, speeds: baseParams.speeds, ratings: baseParams.ratings, variant: baseParams.variant },
+        url: url.toString(),
       };
     }
 
