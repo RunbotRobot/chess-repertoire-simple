@@ -51,22 +51,30 @@ class RateLimiter {
   }
 }
 
-async function fetchExplorerRaw(params, { signal } = {}) {
+async function fetchExplorerRaw(params, { signal, token } = {}) {
   const url = new URL(EXPLORER_URL);
   for (const [k, v] of Object.entries(params)) {
     if (v !== undefined && v !== null && v !== '') url.searchParams.set(k, v);
   }
+  const headers = token ? { Authorization: `Bearer ${token}` } : undefined;
   let attempt = 0;
   for (;;) {
     let res;
     try {
-      res = await fetch(url, { signal });
+      res = await fetch(url, { signal, headers });
     } catch (err) {
       // fetch() throws an opaque TypeError for network failures *and* for
       // CORS rejections alike — the browser deliberately hides the real
       // reason from JS. Check the browser console (not this message) for
       // the actual "blocked by CORS policy" / DNS / offline detail.
       throw new Error(`Could not reach the Lichess explorer (${err.message}). Check the browser console for the real cause — this could be blocked by CORS, offline, or an ad/privacy blocker. URL: ${url}`);
+    }
+    if (res.status === 401) {
+      throw new Error(
+        token
+          ? `Lichess rejected the API token (HTTP 401) — it may be wrong, expired, or revoked. Create a new one at lichess.org/account/oauth/token/create (no scopes needed) and update it in Settings.`
+          : `Lichess now requires an API token to use the opening explorer (HTTP 401, no token was sent). Create a free one at lichess.org/account/oauth/token/create (no scopes needed) and paste it into Settings.`
+      );
     }
     if (res.status === 429) {
       attempt++;
@@ -117,7 +125,7 @@ export async function buildRepertoire(color, settings, opts = {}) {
 
   async function fetchNode(uciPath) {
     return limiter.run(() =>
-      fetchExplorerRaw({ ...baseParams, play: uciPath.join(',') }, { signal: opts.signal })
+      fetchExplorerRaw({ ...baseParams, play: uciPath.join(',') }, { signal: opts.signal, token: settings.lichessToken })
     );
   }
 

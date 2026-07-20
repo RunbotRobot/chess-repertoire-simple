@@ -41,7 +41,7 @@
   label.chip input{margin:0;}
   .field{margin-bottom:12px;}
   .field label{display:block;font-size:12.5px;color:var(--muted);margin-bottom:4px;}
-  .field input[type=number], .field input[type=text], .field select{width:100%;padding:8px;background:var(--panel-2);
+  .field input[type=number], .field input[type=text], .field input[type=password], .field select{width:100%;padding:8px;background:var(--panel-2);
     border:1px solid var(--line);border-radius:6px;color:var(--ink);font-size:14px;}
   .field .hint{font-size:11.5px;color:var(--muted);margin-top:4px;}
   .toggle-row{display:flex;align-items:center;justify-content:space-between;padding:8px 0;
@@ -109,6 +109,19 @@
   </nav>
   <main>
     <section class="view active" id="view-setup">
+      <div class="card">
+        <h3>Lichess account</h3>
+        <div class="field">
+          <label for="lichessToken">API token (required)</label>
+          <input type="password" id="lichessToken" placeholder="Paste your Lichess personal access token">
+          <div class="hint">
+            Lichess now requires being logged in to use the opening explorer. Create a free token at
+            <strong>lichess.org/account/oauth/token/create</strong> — no scopes/permissions need to be checked,
+            just click Create — then paste it here. Stored only on this device.
+          </div>
+        </div>
+      </div>
+
       <div class="card">
         <h3>Repertoire scope</h3>
         <div class="field">

@@ -13,7 +13,7 @@ import { Chess } from './vendor/chess.esm.js';
 // devtools is actually running the latest code, and it also drives the
 // service worker's cache name (see sw.js) so updates actually take effect
 // instead of being served stale from the offline cache.
-export const APP_VERSION = 9;
+export const APP_VERSION = 10;
 
 const COLOR_OPTIONS = ['white', 'black'];
 const RATING_OPTIONS = ['1000', '1200', '1400', '1600', '1800', '2000', '2200', '2500'];
@@ -73,6 +73,7 @@ function buildChipRows() {
 
 function fillSettingsForm() {
   buildChipRows();
+  $('#lichessToken').value = settings.lichessToken || '';
   $('#minSampleSize').value = settings.minSampleSize;
   $('#opponentBranchMinShare').value = Math.round(settings.opponentBranchMinShare * 100);
   $('#opponentBranchMinGames').value = settings.opponentBranchMinGames;
@@ -106,6 +107,7 @@ function readDebugPref() {
 function readSettingsForm() {
   return {
     ...settings,
+    lichessToken: $('#lichessToken').value.trim(),
     colors: $$('input[name=colors]:checked').map((i) => i.value),
     ratingBands: $$('input[name=ratings]:checked').map((i) => i.value),
     speeds: $$('input[name=speeds]:checked').map((i) => i.value),
@@ -179,6 +181,13 @@ $('#build-both').addEventListener('click', async () => {
   const progressText = $('#build-progress-text');
   const errBox = $('#build-error');
   errBox.style.display = 'none';
+
+  if (!settings.lichessToken) {
+    errBox.style.display = 'block';
+    errBox.textContent = 'No Lichess API token set. Lichess now requires one for the opening explorer — create a free token (no scopes needed) at lichess.org/account/oauth/token/create and paste it into the "Lichess account" field above.';
+    return;
+  }
+
   progressWrap.style.display = 'block';
 
   for (const color of settings.colors) {
