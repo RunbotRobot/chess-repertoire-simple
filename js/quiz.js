@@ -93,7 +93,16 @@ export class QuizSession {
       idx++;
     }
 
-    return { missed, attemptPath, pathId: attemptPath.map((p) => p.uci).join(' ') };
+    return {
+      missed,
+      attemptPath,
+      pathId: attemptPath.map((p) => p.uci).join(' '),
+      // Only meaningful on a clean finish: whether the line ended here
+      // because the position budget ran out (real theory may well
+      // continue past this point) rather than genuinely running out of
+      // common enough opponent replies / well-scoring options.
+      truncated: !missed && !!node.truncatedByCap,
+    };
   }
 
   /**
@@ -134,7 +143,9 @@ handlers shape:
                                                         confirm / reveal the correct move. fen reflects the
                                                         position after the move when correct, or is unchanged
                                                         (pre-move) on a miss, so a board can be kept in sync.
-  onLineEnd({missed, attemptPath}) -> Promise<void>
+  onLineEnd({missed, attemptPath, truncated}) -> Promise<void>
+                                                        truncated is true only on a clean finish that hit the
+                                                        position budget rather than a real end of theory
   onReplayStart(attemptPath) -> Promise<void>
   onReplayEnd({missed, attemptPath}) -> Promise<void>
 */

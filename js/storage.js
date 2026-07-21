@@ -25,7 +25,8 @@ export const DEFAULT_SETTINGS = {
   ratingBands: ['1600', '1800', '2000'], // lichess explorer rating buckets to pool together
   speeds: ['blitz', 'rapid'],
   minSampleSize: 20,     // a node needs at least this many games to be trusted/expanded
-  maxPlies: 40,          // hard safety cap on repertoire depth (20 full moves)
+  maxPlies: 40,          // hard safety cap on repertoire depth (20 full moves); null/Infinity = no cap
+  maxNodes: 300,         // hard cap on total positions fetched per repertoire — the real memory/network bound
   opponentBranchMinShare: 0.05, // ignore opponent replies played less than 5% of the time at a node
   opponentBranchMinGames: 15,   // ...unless they still clear this absolute game-count floor
   repertoireMaxAgeHours: 24,    // recompute if the cached tree is older than this

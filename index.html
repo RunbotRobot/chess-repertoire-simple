@@ -166,10 +166,23 @@
           <label for="maxPlies">Max depth (half-moves)</label>
           <input type="number" id="maxPlies" min="2" step="2" placeholder="blank = no limit">
           <div class="hint">
-            Leave blank for no depth limit. A separate hard cap of 300 total fetched
-            positions still applies regardless, and lines naturally stop growing once a
-            branch's game count drops below "minimum games to trust a position" anyway —
-            so this won't run away on memory or requests.
+            Leave blank for no depth limit. The position budget below still applies
+            regardless, and lines naturally stop growing once a branch's game count drops
+            below "minimum games to trust a position" anyway — so this won't run away on
+            memory or requests.
+          </div>
+        </div>
+        <div class="field">
+          <label for="maxNodes">Position budget (per repertoire)</label>
+          <input type="number" id="maxNodes" min="10" step="10">
+          <div class="hint">
+            Total positions fetched from Lichess per color, across every line combined —
+            the real cap on build time, network requests, and memory. If it runs out before
+            a well-documented line naturally ends, that line gets cut short artificially; the
+            repertoire status below will tell you how often that happened, and quizzing will
+            flag it by name when you actually reach one of those cut-short lines, rather than
+            treating it the same as a genuine end of theory. Raise this if that keeps
+            happening on lines you care about.
           </div>
         </div>
       </div>

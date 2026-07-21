@@ -13,7 +13,7 @@ import { Chess } from './vendor/chess.esm.js';
 // devtools is actually running the latest code, and it also drives the
 // service worker's cache name (see sw.js) so updates actually take effect
 // instead of being served stale from the offline cache.
-export const APP_VERSION = 19;
+export const APP_VERSION = 20;
 
 const COLOR_OPTIONS = ['white', 'black'];
 const RATING_OPTIONS = ['1000', '1200', '1400', '1600', '1800', '2000', '2200', '2500'];
@@ -109,6 +109,7 @@ function fillSettingsForm() {
   $('#opponentBranchMinShare').value = Math.round(settings.opponentBranchMinShare * 100);
   $('#opponentBranchMinGames').value = settings.opponentBranchMinGames;
   $('#maxPlies').value = Number.isFinite(settings.maxPlies) ? settings.maxPlies : '';
+  $('#maxNodes').value = settings.maxNodes;
   $('#alwaysReplayOnSuccess').checked = settings.alwaysReplayOnSuccess;
   $('#dimScreenDuringQuiz').checked = settings.dimScreenDuringQuiz;
   $('#showDebugLog').checked = readDebugPref();
@@ -149,6 +150,7 @@ function readSettingsForm() {
     // separate hard maxNodes cap (see explorer.js) is what actually bounds
     // memory/network use, so there's no need to force a depth limit too.
     maxPlies: $('#maxPlies').value.trim() === '' ? Infinity : Number($('#maxPlies').value),
+    maxNodes: Number($('#maxNodes').value) || DEFAULT_SETTINGS.maxNodes,
     alwaysReplayOnSuccess: $('#alwaysReplayOnSuccess').checked,
     dimScreenDuringQuiz: $('#dimScreenDuringQuiz').checked,
     voiceURI: $('#voiceSelect').value || null,
@@ -179,8 +181,12 @@ function renderRepStatus() {
     } else {
       const stale = isStale(rep, settings.repertoireMaxAgeHours);
       const lines = countLines(rep.root);
+      const truncatedLines = countTruncatedLines(rep.root);
       const failNote = rep.nodesFailed ? ` — ${rep.nodesFailed} position(s) failed to fetch` : '';
-      div.innerHTML = `<span>${cap(color)}: ${lines} line(s), ${rep.nodesFetched} positions fetched${rep.nodesCapped ? ' (capped)' : ''}${failNote}</span>
+      const truncNote = truncatedLines
+        ? ` — ${truncatedLines} of ${lines} line(s) cut short by the position budget, raise it in Setup for more`
+        : '';
+      div.innerHTML = `<span>${cap(color)}: ${lines} line(s), ${rep.nodesFetched} positions fetched${rep.nodesCapped ? ' (capped)' : ''}${failNote}${truncNote}</span>
         <span class="meta">${stale ? 'stale — ' : ''}window ${windowLabel(rep.monthWindow)}</span>`;
     }
     wrap.appendChild(div);
@@ -199,6 +205,28 @@ function countLines(node) {
     total += child ? countLines(child) : 1;
   }
   return total || 1;
+}
+
+// Mirrors countLines, but only counts leaves cut short by the position
+// budget — an artificial stopping point, not a genuine end of theory.
+function countTruncatedLines(node) {
+  if (!node.myMove && !node.opponentMoves) return node.truncatedByCap ? 1 : 0;
+  if (node.myMove) {
+    const child = node.children[node.myMove.uci];
+    return child ? countTruncatedLines(child) : 0;
+  }
+  let total = 0;
+  for (const m of node.opponentMoves || []) {
+    const child = node.children[m.uci];
+    total += child ? countTruncatedLines(child) : 0;
+  }
+  return total;
+}
+
+function leafMessage(node) {
+  return node.truncatedByCap
+    ? 'Cut short by the position budget — real theory may well continue past here. Raise "Position budget" in Setup to see further.'
+    : 'End of prepared theory for this line.';
 }
 
 function cap(s) { return s[0].toUpperCase() + s.slice(1); }
@@ -342,9 +370,9 @@ function renderBrowse() {
       btn.addEventListener('click', () => { browsePath = [...browsePath, m]; renderBrowse(); });
       movelist.appendChild(btn);
     }
-    if (node.opponentMoves.length === 0) movelist.innerHTML += '<div class="hint">No further data — this is the end of prepared theory.</div>';
+    if (node.opponentMoves.length === 0) movelist.innerHTML += `<div class="hint">${leafMessage(node)}</div>`;
   } else {
-    movelist.innerHTML = '<div class="hint">End of prepared theory for this line.</div>';
+    movelist.innerHTML = `<div class="hint">${leafMessage(node)}</div>`;
   }
 }
 
@@ -522,8 +550,9 @@ async function startVoiceQuiz(quizMode) {
         await speakGuarded(`Not quite. The move was ${sanSpoken(correctSan)}.`);
       }
     },
-    onLineEnd: async ({ missed }) => {
-      if (!missed) await speakGuarded('Line complete.');
+    onLineEnd: async ({ missed, truncated }) => {
+      if (missed) return;
+      await speakGuarded(truncated ? "That's as far as I've fetched — not necessarily the end of real theory." : 'Line complete.');
     },
     onReplayStart: async () => {
       await speakGuarded("Let's run through that line again.");
@@ -635,8 +664,11 @@ async function startManualQuiz(quizMode) {
       }
       $('#manual-movelist').innerHTML = '';
     },
-    onLineEnd: async ({ missed }) => {
-      if (!missed) $('#manual-status').textContent = 'Line complete.';
+    onLineEnd: async ({ missed, truncated }) => {
+      if (missed) return;
+      $('#manual-status').textContent = truncated
+        ? "That's as far as I've fetched — not necessarily the end of real theory. Raise the position budget in Setup for more."
+        : 'Line complete.';
     },
     onReplayStart: async () => {
       $('#manual-status').textContent = "Replaying that line for memorization…";

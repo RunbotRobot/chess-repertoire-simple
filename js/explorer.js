@@ -6,16 +6,18 @@
 // every reply that's actually common — I need to be ready for whichever one
 // they play, weighted by how often it's actually played.
 //
-// Data-source caveat: the repertoire is scoped to the last fully-completed
-// calendar month plus whatever's available of the current one, switching
-// over on the 1st — see monthWindow(). This has been a genuinely hard bug
-// to pin down live (see git history for the full trail). Round one: bare
-// `since`/`until` as YYYY-MM (the documented format) returned 0 games with
-// `since` set, so a full YYYY-MM-DD date was tried instead — but the
-// server rejected that outright: "Failed to deserialize query string:
-// invalid month". So YYYY-MM was right all along, and the actual cause is
-// still open — back to YYYY-MM here, with sharper probes (see expand())
-// to actually pin it down instead of guessing a third time.
+// Data-source caveat: the repertoire is scoped to a single calendar
+// month — the last fully-completed one — switching over on the 1st. Root
+// cause, confirmed live across several rounds of probing (see git history
+// for the full trail): `since`/`until` set to two *different* months
+// returns 0 games, no matter which two months (including when `until` is
+// merely omitted, which defaults to something far away — still "different"
+// from `since`). `since === until` on one single, fully-completed month
+// works correctly and returns real data. The obvious first guess — the
+// *current*, still-in-progress month having no data yet — is a second, and
+// entirely separate real issue, but it isn't the multi-month bug: pointing
+// `since` (alone) at the current month also returned 0. So both months in
+// use here must be identical, and neither can be the current one.
 const EXPLORER_URL = 'https://explorer.lichess.org/lichess';
 
 function monthString(monthOffset, from = new Date()) {
@@ -24,7 +26,8 @@ function monthString(monthOffset, from = new Date()) {
 }
 
 export function monthWindow() {
-  return { since: monthString(-1), until: monthString(0) };
+  const lastCompletedMonth = monthString(-1);
+  return { since: lastCompletedMonth, until: lastCompletedMonth };
 }
 
 class RateLimiter {
@@ -159,7 +162,16 @@ export async function buildRepertoire(color, settings, opts = {}) {
 
   async function expand(node, uciPath) {
     if (opts.signal?.aborted) return;
-    if (nodesFetched >= maxNodes) { nodesCapped = true; return; }
+    if (nodesFetched >= maxNodes) {
+      // This node would have been expanded, but the position budget ran out
+      // before we got to it — an artificial cutoff, not a real end of
+      // theory. Distinct from a node we *did* fetch and found genuinely too
+      // thin (see the minSampleSize check below) — quiz.js/app.js use this
+      // to tell the user which one they actually hit.
+      nodesCapped = true;
+      node.truncatedByCap = true;
+      return;
+    }
     if (node.ply >= maxPlies) return;
 
     let data, url;
@@ -193,20 +205,16 @@ export async function buildRepertoire(color, settings, opts = {}) {
       };
 
       if (totalGames === 0) {
-        // Round 1 (since/until dropped in every combination) already showed
-        // `since` alone breaks it while `until` alone doesn't. Round 2 (full
-        // YYYY-MM-DD dates) got an explicit "invalid month" rejection, which
-        // rules out the date *format* — YYYY-MM is confirmed correct. Round
-        // 3 probes what's left: whether combining a date range with a
-        // *rating* filter specifically is what's unsupported, and whether
-        // `since` fails only for already-completed past months (vs. also
-        // failing for the current one).
-        const twoMonthsAgo = monthString(-2);
+        // The mechanism is now understood (see the header comment) and the
+        // primary query already uses the confirmed-working shape — a real
+        // 0 here would mean something new. Two cheap sanity checks: the
+        // month before this one (in case this specific month is somehow
+        // still incomplete/unindexed), and no date filter at all (confirms
+        // whether it's a date issue at all, vs. e.g. ratings/speed being
+        // genuinely too narrow for this one month).
         const probeVariants = [
+          { label: 'one month earlier still (same value)', overrides: { since: monthString(-2), until: monthString(-2) } },
           { label: 'no since, no until', overrides: { since: undefined, until: undefined } },
-          { label: 'since+until, no ratings filter', overrides: { ratings: undefined } },
-          { label: 'since=until=a fully-completed past month', overrides: { since: twoMonthsAgo, until: twoMonthsAgo } },
-          { label: 'since = current month (not past), no until', overrides: { since: monthString(0), until: undefined } },
         ];
         rootDiagnostic.probes = [];
         for (const variant of probeVariants) {
@@ -255,7 +263,11 @@ export async function buildRepertoire(color, settings, opts = {}) {
         .sort((a, b) => b.games - a.games);
       node.opponentMoves = kept;
       for (const m of kept) {
-        if (nodesFetched >= maxNodes) { nodesCapped = true; break; }
+        // No pre-check for the budget here — always create the child and
+        // let expand()'s own top-of-function guard handle it. That's what
+        // actually sets truncatedByCap; pre-checking here too would let
+        // some cap-truncated branches vanish silently (no child node at
+        // all) instead of being flagged like every other truncated leaf.
         const childPath = [...uciPath, m.uci];
         const child = { uci: m.uci, san: m.san, ply: node.ply + 1, games: 0, myMove: null, opponentMoves: null, children: {} };
         node.children[m.uci] = child;
