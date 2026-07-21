@@ -188,9 +188,25 @@ export async function buildRepertoire(color, settings, opts = {}) {
 
   const baseParams = { ...probeParams, since, until };
 
+  // Separates "waiting for a free slot" (our own RateLimiter, cheap to
+  // change) from "the server actually took this long to respond" (not
+  // something raising concurrency fixes) — otherwise slow builds are just
+  // a mystery. Summarized once at the end rather than logged per-request.
+  const timing = { count: 0, totalQueueMs: 0, totalFetchMs: 0, maxFetchMs: 0 };
+
   async function fetchNode(uciPath) {
     const url = buildExplorerUrl({ ...baseParams, play: uciPath.join(',') });
-    const data = await limiter.run(() => fetchExplorerRaw(url, { signal: opts.signal, token: settings.lichessToken }));
+    const queuedAt = performance.now();
+    const data = await limiter.run(async () => {
+      const startedAt = performance.now();
+      const result = await fetchExplorerRaw(url, { signal: opts.signal, token: settings.lichessToken });
+      const fetchMs = performance.now() - startedAt;
+      timing.count++;
+      timing.totalQueueMs += startedAt - queuedAt;
+      timing.totalFetchMs += fetchMs;
+      timing.maxFetchMs = Math.max(timing.maxFetchMs, fetchMs);
+      return result;
+    });
     return { data, url };
   }
 
@@ -331,6 +347,12 @@ export async function buildRepertoire(color, settings, opts = {}) {
     nodesFailed,
     firstFailureMessage,
     rootDiagnostic,
+    timing: timing.count > 0 ? {
+      count: timing.count,
+      avgQueueMs: Math.round(timing.totalQueueMs / timing.count),
+      avgFetchMs: Math.round(timing.totalFetchMs / timing.count),
+      maxFetchMs: Math.round(timing.maxFetchMs),
+    } : null,
     root,
   };
 }
