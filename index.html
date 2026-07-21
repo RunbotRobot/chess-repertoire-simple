@@ -61,13 +61,6 @@
   button.btn-block{width:100%;}
   .btn-row{display:flex;gap:8px;flex-wrap:wrap;}
 
-  .repcard{display:flex;justify-content:space-between;align-items:center;padding:10px;
-    background:var(--panel-2);border-radius:8px;margin-bottom:8px;font-size:13px;}
-  .repcard .meta{color:var(--muted);font-size:11.5px;}
-  .progressbar{height:6px;background:var(--panel-2);border-radius:4px;overflow:hidden;margin:8px 0;}
-  .progressbar > div{height:100%;background:var(--accent);width:0%;transition:width .2s;}
-  .progressbar.indeterminate > div{width:35%!important;transition:none;animation:indeterminate-sweep 1.1s ease-in-out infinite;}
-  @keyframes indeterminate-sweep{0%{margin-left:-35%;}100%{margin-left:100%;}}
   .errbox{background:#3a1c1c;border:1px solid var(--bad);color:#ffb3ab;padding:8px 10px;
     border-radius:6px;font-size:12.5px;margin-top:8px;white-space:pre-wrap;}
 
@@ -166,24 +159,15 @@
           <label for="maxPlies">Max depth (half-moves)</label>
           <input type="number" id="maxPlies" min="2" step="2" placeholder="blank = no limit">
           <div class="hint">
-            Leave blank for no depth limit. The position budget below still applies
-            regardless, and lines naturally stop growing once a branch's game count drops
-            below "minimum games to trust a position" anyway — so this won't run away on
-            memory or requests.
+            Leave blank for no depth limit. Lines naturally stop growing once a branch's
+            game count drops below "minimum games to trust a position" anyway, so this
+            mostly just guards against pathologically long lines.
           </div>
         </div>
         <div class="field">
-          <label for="maxNodes">Position budget (per repertoire)</label>
-          <input type="number" id="maxNodes" min="10" step="10">
-          <div class="hint">
-            Total positions fetched from Lichess per color, across every line combined —
-            the real cap on build time, network requests, and memory. If it runs out before
-            a well-documented line naturally ends, that line gets cut short artificially; the
-            repertoire status below will tell you how often that happened, and quizzing will
-            flag it by name when you actually reach one of those cut-short lines, rather than
-            treating it the same as a genuine end of theory. Raise this if that keeps
-            happening on lines you care about.
-          </div>
+          <label for="repertoireMaxAgeHours">Cache freshness (hours)</label>
+          <input type="number" id="repertoireMaxAgeHours" min="1" step="1">
+          <div class="hint">A cached position older than this gets transparently refetched next time it's actually needed.</div>
         </div>
       </div>
 
@@ -214,15 +198,20 @@
 
       <div class="btn-row" style="margin-bottom:12px;">
         <button class="btn" id="save-settings">Save settings</button>
-        <button class="btn secondary" id="build-both">Build / refresh repertoires</button>
       </div>
 
-      <div class="card" id="repertoire-status">
-        <h3>Repertoire status</h3>
-        <div id="rep-cards"></div>
-        <div class="progressbar" id="build-progress-wrap" style="display:none;"><div id="build-progress-bar"></div></div>
-        <div id="build-progress-text" class="hint"></div>
-        <div id="build-error" class="errbox" style="display:none;"></div>
+      <div class="card" id="cache-status">
+        <h3>Position cache</h3>
+        <div class="hint">
+          Positions are fetched from Lichess on demand — as Browse or Quiz actually reach
+          them — and kept here so later visits are instant. A cached position gets
+          transparently refetched once it's older than the age limit above.
+        </div>
+        <div id="cache-stats" class="hint" style="margin-top:8px;"></div>
+        <div class="btn-row" style="margin-top:10px;">
+          <button class="btn secondary" id="clear-cache">Clear cache</button>
+        </div>
+        <div id="cache-error" class="errbox" style="display:none;"></div>
         <div class="toggle-row" style="border-bottom:none;padding-bottom:0;margin-top:10px;">
           <label style="margin:0;font-size:12.5px;color:var(--muted);">Recent activity</label>
           <button class="btn secondary" id="copy-log-setup" style="padding:5px 12px;font-size:12px;">Copy log</button>

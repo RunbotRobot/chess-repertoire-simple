@@ -23,7 +23,12 @@ function applyUci(chess, uci) {
 }
 
 /**
- * Drives one quiz session against a prebuilt repertoire tree.
+ * Drives one quiz session against positions fetched lazily as they're
+ * needed, rather than a prebuilt tree — see explorer.js's header comment
+ * for why. getNode(uciPath) is injected (app.js wires it to explorer.js's
+ * getPosition()) so this stays testable without a real cache or network —
+ * and getNode can throw (a live network failure mid-quiz is now possible,
+ * where it never used to be); callers should expect that.
  *
  * Flow per "line": play from the root, opponent replies sampled live by
  * real game frequency, I supply my moves by voice. First wrong move stops
@@ -32,8 +37,8 @@ function applyUci(chess, uci) {
  * memorization before moving on to a freshly-sampled next line.
  */
 export class QuizSession {
-  constructor({ repertoire, settings, color, handlers }) {
-    this.repertoire = repertoire;
+  constructor({ getNode, settings, color, handlers }) {
+    this.getNode = getNode; // async (uciPath: string[]) => {games, myMove, opponentMoves}
     this.settings = settings;
     this.color = color;
     this.handlers = handlers; // see method docs below for the shape
@@ -41,7 +46,8 @@ export class QuizSession {
 
   async runPlaythrough(forcedUciPath = null) {
     const chess = new Chess();
-    let node = this.repertoire.root;
+    const uciPath = [];
+    let node = await this.getNode(uciPath);
     const attemptPath = [];
     let missed = false;
     let idx = 0;
@@ -50,17 +56,16 @@ export class QuizSession {
       const isMyMove = !!node.myMove;
 
       if (!isMyMove) {
-        const options = node.opponentMoves
-          .map((m) => ({ ...m, child: node.children[m.uci] }))
-          .filter((m) => m.child);
-        if (options.length === 0) break;
-        const chosen = forcedUciPath ? options.find((o) => o.uci === forcedUciPath[idx]) : weightedPick(options);
+        const chosen = forcedUciPath
+          ? node.opponentMoves.find((o) => o.uci === forcedUciPath[idx])
+          : weightedPick(node.opponentMoves);
         if (!chosen) break;
         const moveResult = applyUci(chess, chosen.uci);
-        if (!moveResult) break; // shouldn't happen; defends against a corrupt tree
+        if (!moveResult) break; // shouldn't happen; defends against bad data from the API
         attemptPath.push({ uci: chosen.uci, san: chosen.san, mover: 'opponent' });
         await this.handlers.onOpponentMove?.({ san: chosen.san, uci: chosen.uci, fen: chess.fen() });
-        node = node.children[chosen.uci];
+        uciPath.push(chosen.uci);
+        node = await this.getNode(uciPath);
         idx++;
         continue;
       }
@@ -89,20 +94,12 @@ export class QuizSession {
         break;
       }
       attemptPath.push({ uci: node.myMove.uci, san: node.myMove.san, mover: 'me' });
-      node = node.children[node.myMove.uci];
+      uciPath.push(node.myMove.uci);
+      node = await this.getNode(uciPath);
       idx++;
     }
 
-    return {
-      missed,
-      attemptPath,
-      pathId: attemptPath.map((p) => p.uci).join(' '),
-      // Only meaningful on a clean finish: whether the line ended here
-      // because the position budget ran out (real theory may well
-      // continue past this point) rather than genuinely running out of
-      // common enough opponent replies / well-scoring options.
-      truncated: !missed && !!node.truncatedByCap,
-    };
+    return { missed, attemptPath, pathId: attemptPath.map((p) => p.uci).join(' ') };
   }
 
   /**
@@ -143,9 +140,7 @@ handlers shape:
                                                         confirm / reveal the correct move. fen reflects the
                                                         position after the move when correct, or is unchanged
                                                         (pre-move) on a miss, so a board can be kept in sync.
-  onLineEnd({missed, attemptPath, truncated}) -> Promise<void>
-                                                        truncated is true only on a clean finish that hit the
-                                                        position budget rather than a real end of theory
+  onLineEnd({missed, attemptPath}) -> Promise<void>
   onReplayStart(attemptPath) -> Promise<void>
   onReplayEnd({missed, attemptPath}) -> Promise<void>
 */

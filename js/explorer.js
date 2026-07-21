@@ -1,23 +1,35 @@
-// Talks to the Lichess Opening Explorer API and turns raw game-frequency data
-// into a repertoire tree.
+// Talks to the Lichess Opening Explorer API and turns a raw game-frequency
+// response into a repertoire node.
 //
 // Core rule, per spec: at *my* move, always take the single reply that scored
 // best in real games (draws count as a loss). At the *opponent's* move, keep
 // every reply that's actually common — I need to be ready for whichever one
 // they play, weighted by how often it's actually played.
 //
+// Architecture note: this used to eagerly build a whole tree (up to a few
+// hundred positions) before a quiz could start, which meant a multi-minute
+// wait up front — the actual bottleneck turned out to be Lichess's own
+// per-request response time (confirmed live via the timing instrumentation
+// this replaced), not anything about how we called it. So instead of one
+// big sync, positions are now fetched lazily, one at a time, exactly when
+// something (quiz or browse) actually navigates to them, and cached in
+// IndexedDB (see positionCache.js) keyed by the query params that affect
+// the data (variant/speeds/ratings/month/move-sequence) — deliberately NOT
+// by color, since the same position reached by transposition is identical
+// data regardless of which repertoire found it, and NOT by scoring settings
+// (minSampleSize etc.), which are applied fresh on every read instead.
+// "Periodic re-fetching" falls out of this for free: a cached entry older
+// than repertoireMaxAgeHours is transparently refetched next time it's
+// actually needed, rather than needing a separate background sweep.
+//
 // Data-source caveat: the repertoire is scoped to a single calendar
-// month — the last fully-completed one — switching over on the 1st. Root
-// cause, confirmed live across several rounds of probing (see git history
-// for the full trail): `since`/`until` set to two *different* months
-// returns 0 games, no matter which two months (including when `until` is
-// merely omitted, which defaults to something far away — still "different"
-// from `since`). `since === until` on one single, fully-completed month
-// works correctly and returns real data. The obvious first guess — the
-// *current*, still-in-progress month having no data yet — is a second, and
-// entirely separate real issue, but it isn't the multi-month bug: pointing
-// `since` (alone) at the current month also returned 0. So both months in
-// use here must be identical, and neither can be the current one.
+// month — the last one that's actually indexed, which isn't necessarily the
+// last *completed* one — see resolveAvailableMonth()'s comment. Also,
+// `since`/`until` must be sent as an identical single YYYY-MM value; two
+// different months (or one omitted) reliably returns 0 games. Both findings
+// came from live probing — see git history for the full trail.
+import { getCached, putCached } from './positionCache.js';
+
 const EXPLORER_URL = 'https://explorer.lichess.org/lichess';
 
 function monthString(monthOffset, from = new Date()) {
@@ -27,9 +39,8 @@ function monthString(monthOffset, from = new Date()) {
 
 // The "preferred" month if everything were indexed instantly. What actually
 // gets *queried* is resolved separately by resolveAvailableMonth(), which
-// may fall back further back in time — isStale() deliberately does NOT
-// compare against this (see its comment), so this is exported purely as a
-// building block / for display, not as a source of truth for freshness.
+// may fall back further back in time — exported purely as a building block
+// / for display, not as a source of truth for freshness.
 export function monthWindow() {
   const lastCompletedMonth = monthString(-1);
   return { since: lastCompletedMonth, until: lastCompletedMonth };
@@ -60,36 +71,25 @@ async function resolveAvailableMonth(probeParams, token, opts = {}) {
   return { month: null, monthsBack: null, attempts };
 }
 
-class RateLimiter {
-  constructor(maxConcurrent = 4, minGapMs = 60) {
-    this.maxConcurrent = maxConcurrent;
-    this.minGapMs = minGapMs;
-    this.active = 0;
-    this.queue = [];
-    this.lastStart = 0;
+// Resolving the available month costs up to MAX_MONTHS_LOOKBACK requests —
+// fine once, wasteful to repeat on every single lazy position fetch. Cached
+// in memory per (ratings, speeds) signature for the life of the page;
+// there's no need to persist it since re-resolving once per session is
+// cheap and avoids any staleness edge cases around month boundaries.
+const monthResolutionCache = new Map();
+
+async function resolveMonthCached(probeParams, token, opts = {}) {
+  const key = `${probeParams.ratings}|${probeParams.speeds}`;
+  const cached = monthResolutionCache.get(key);
+  if (cached && Date.now() - cached.resolvedAt < 12 * 3600 * 1000) return cached;
+  const resolved = await resolveAvailableMonth(probeParams, token, opts);
+  if (!resolved.month) {
+    const tried = resolved.attempts.map((a) => `${a.month} (${a.totalGames} games)`).join(', ');
+    throw new Error(`No month in the last ${MAX_MONTHS_LOOKBACK} had any games for these filters — tried ${tried}. The filters (rating/speed) may be too narrow, or something is still wrong with the query.`);
   }
-  run(fn) {
-    return new Promise((resolve, reject) => {
-      this.queue.push({ fn, resolve, reject });
-      this._pump();
-    });
-  }
-  _pump() {
-    if (this.active >= this.maxConcurrent || this.queue.length === 0) return;
-    const now = Date.now();
-    const wait = Math.max(0, this.lastStart + this.minGapMs - now);
-    setTimeout(() => {
-      const item = this.queue.shift();
-      if (!item) return;
-      this.active++;
-      this.lastStart = Date.now();
-      item.fn().then(item.resolve, item.reject).finally(() => {
-        this.active--;
-        this._pump();
-      });
-      this._pump();
-    }, wait);
-  }
+  const entry = { ...resolved, resolvedAt: Date.now() };
+  monthResolutionCache.set(key, entry);
+  return entry;
 }
 
 function buildExplorerUrl(params) {
@@ -149,26 +149,45 @@ async function fetchExplorerRaw(url, { signal, token } = {}) {
   }
 }
 
-/**
- * Build a repertoire tree for one color.
- * @param {'white'|'black'} color
- * @param {object} settings
- * @param {{onProgress?: (n:{nodesFetched:number})=>void, signal?: AbortSignal}} opts
- */
-export async function buildRepertoire(color, settings, opts = {}) {
-  const limiter = new RateLimiter(4, 60);
-  // "No depth limit" round-trips through JSON as null (Infinity isn't
-  // JSON-safe), and `ply >= null` coerces null to 0 — silently terminating
-  // the tree at the root instead of never terminating. Normalize once here.
-  const maxPlies = Number.isFinite(settings.maxPlies) ? settings.maxPlies : Infinity;
-  let nodesFetched = 0;
-  let nodesCapped = false;
-  let nodesFailed = 0;
-  let firstFailureMessage = null;
-  let rootDiagnostic = null;
-  const maxNodes = settings.maxNodes || 300;
+// Pure function: turns one raw Lichess response into a repertoire node,
+// given the color/ply context and current scoring settings. No I/O, so it's
+// cheap to recompute on every read — meaning changing minSampleSize etc. in
+// Settings takes effect immediately against already-cached data.
+function computeNodeFromRaw(data, color, ply, settings) {
+  const moves = Array.isArray(data.moves) ? data.moves : [];
+  const totalGames = moves.reduce((s, m) => s + (m.white || 0) + (m.draws || 0) + (m.black || 0), 0);
 
-  const probeParams = {
+  if (totalGames < settings.minSampleSize || moves.length === 0) {
+    return { games: totalGames, myMove: null, opponentMoves: null }; // not enough data to trust this position; it's a leaf
+  }
+
+  const isMyMove = (ply % 2 === 0) === (color === 'white');
+
+  if (isMyMove) {
+    // Score every candidate by MY win rate from this position, draws = loss.
+    let best = null;
+    for (const m of moves) {
+      const n = (m.white || 0) + (m.draws || 0) + (m.black || 0);
+      if (n < settings.minSampleSize) continue;
+      const wins = color === 'white' ? (m.white || 0) : (m.black || 0);
+      const score = wins / n;
+      if (!best || score > best.score) best = { uci: m.uci, san: m.san, games: n, score };
+    }
+    return { games: totalGames, myMove: best, opponentMoves: null };
+  }
+
+  // Keep every reply that's genuinely common; I need to be ready for it.
+  const kept = moves
+    .map((m) => ({ uci: m.uci, san: m.san, games: (m.white || 0) + (m.draws || 0) + (m.black || 0) }))
+    .filter((m) => m.games > 0)
+    .map((m) => ({ ...m, share: m.games / totalGames }))
+    .filter((m) => m.share >= settings.opponentBranchMinShare || m.games >= settings.opponentBranchMinGames)
+    .sort((a, b) => b.games - a.games);
+  return { games: totalGames, myMove: null, opponentMoves: kept };
+}
+
+function explorerQueryParams(settings) {
+  return {
     variant: 'standard',
     speeds: settings.speeds.join(','),
     ratings: settings.ratingBands.join(','),
@@ -178,194 +197,54 @@ export async function buildRepertoire(color, settings, opts = {}) {
     // reason to send a non-default value that could interact oddly with a
     // recently-changed, newly-authenticated endpoint.
   };
-
-  const resolved = await resolveAvailableMonth(probeParams, settings.lichessToken, opts);
-  if (!resolved.month) {
-    const tried = resolved.attempts.map((a) => `${a.month} (${a.totalGames} games)`).join(', ');
-    throw new Error(`No month in the last ${MAX_MONTHS_LOOKBACK} had any games for these filters — tried ${tried}. The filters (rating/speed) may be too narrow, or something is still wrong with the query.`);
-  }
-  const { since, until } = { since: resolved.month, until: resolved.month };
-
-  const baseParams = { ...probeParams, since, until };
-
-  // Separates "waiting for a free slot" (our own RateLimiter, cheap to
-  // change) from "the server actually took this long to respond" (not
-  // something raising concurrency fixes) — otherwise slow builds are just
-  // a mystery. Summarized once at the end rather than logged per-request.
-  const timing = { count: 0, totalQueueMs: 0, totalFetchMs: 0, maxFetchMs: 0 };
-
-  async function fetchNode(uciPath) {
-    const url = buildExplorerUrl({ ...baseParams, play: uciPath.join(',') });
-    const queuedAt = performance.now();
-    const data = await limiter.run(async () => {
-      const startedAt = performance.now();
-      const result = await fetchExplorerRaw(url, { signal: opts.signal, token: settings.lichessToken });
-      const fetchMs = performance.now() - startedAt;
-      timing.count++;
-      timing.totalQueueMs += startedAt - queuedAt;
-      timing.totalFetchMs += fetchMs;
-      timing.maxFetchMs = Math.max(timing.maxFetchMs, fetchMs);
-      return result;
-    });
-    return { data, url };
-  }
-
-  const root = { uci: null, san: null, ply: 0, games: 0, myMove: null, opponentMoves: null, children: {} };
-
-  async function expand(node, uciPath) {
-    if (opts.signal?.aborted) return;
-    if (nodesFetched >= maxNodes) {
-      // This node would have been expanded, but the position budget ran out
-      // before we got to it — an artificial cutoff, not a real end of
-      // theory. Distinct from a node we *did* fetch and found genuinely too
-      // thin (see the minSampleSize check below) — quiz.js/app.js use this
-      // to tell the user which one they actually hit.
-      nodesCapped = true;
-      node.truncatedByCap = true;
-      return;
-    }
-    if (node.ply >= maxPlies) return;
-
-    let data, url;
-    try {
-      ({ data, url } = await fetchNode(uciPath));
-    } catch (err) {
-      node.fetchError = String(err.message || err);
-      nodesFailed++;
-      firstFailureMessage ??= node.fetchError;
-      return;
-    }
-    nodesFetched++;
-    opts.onProgress?.({ nodesFetched, nodesCapped });
-
-    const moves = Array.isArray(data.moves) ? data.moves : [];
-    const totalGames = moves.reduce((s, m) => s + (m.white || 0) + (m.draws || 0) + (m.black || 0), 0);
-    node.games = totalGames;
-
-    if (node === root) {
-      // The single highest-value diagnostic point: the starting position
-      // should always have a huge sample. If it doesn't, something is
-      // wrong with the query itself (bad params, an API behavior change,
-      // an unexpected response shape) rather than genuinely thin data —
-      // capture enough here to tell the difference without live access to
-      // the API ourselves.
-      rootDiagnostic = {
-        totalGames,
-        movesReturned: moves.length,
-        topLevel: { white: data.white, draws: data.draws, black: data.black },
-        url: url.toString(),
-      };
-
-      if (totalGames === 0) {
-        // The mechanism is now understood (see the header comment) and the
-        // primary query already uses the confirmed-working shape — a real
-        // 0 here would mean something new. Two cheap sanity checks: the
-        // month before this one (in case this specific month is somehow
-        // still incomplete/unindexed), and no date filter at all (confirms
-        // whether it's a date issue at all, vs. e.g. ratings/speed being
-        // genuinely too narrow for this one month).
-        const probeVariants = [
-          { label: 'one month earlier still (same value)', overrides: { since: monthString(-2), until: monthString(-2) } },
-          { label: 'no since, no until', overrides: { since: undefined, until: undefined } },
-        ];
-        rootDiagnostic.probes = [];
-        for (const variant of probeVariants) {
-          try {
-            const probeUrl = buildExplorerUrl({ ...baseParams, ...variant.overrides });
-            const probeData = await limiter.run(() => fetchExplorerRaw(probeUrl, { signal: opts.signal, token: settings.lichessToken }));
-            const probeMoves = Array.isArray(probeData.moves) ? probeData.moves : [];
-            const probeTotalGames = probeMoves.reduce((s, m) => s + (m.white || 0) + (m.draws || 0) + (m.black || 0), 0);
-            rootDiagnostic.probes.push({ label: variant.label, totalGames: probeTotalGames, movesReturned: probeMoves.length, url: probeUrl.toString() });
-          } catch (err) {
-            rootDiagnostic.probes.push({ label: variant.label, error: String(err.message || err) });
-          }
-        }
-      }
-    }
-
-    if (totalGames < settings.minSampleSize || moves.length === 0) {
-      return; // not enough data to trust this position further; it's a leaf
-    }
-
-    const isMyMove = (node.ply % 2 === 0) === (color === 'white');
-
-    if (isMyMove) {
-      // Score every candidate by MY win rate from this position, draws = loss.
-      let best = null;
-      for (const m of moves) {
-        const n = (m.white || 0) + (m.draws || 0) + (m.black || 0);
-        if (n < settings.minSampleSize) continue;
-        const wins = color === 'white' ? (m.white || 0) : (m.black || 0);
-        const score = wins / n;
-        if (!best || score > best.score) best = { uci: m.uci, san: m.san, games: n, score };
-      }
-      if (!best) return;
-      node.myMove = best;
-      const childPath = [...uciPath, best.uci];
-      const child = { uci: best.uci, san: best.san, ply: node.ply + 1, games: 0, myMove: null, opponentMoves: null, children: {} };
-      node.children[best.uci] = child;
-      await expand(child, childPath);
-    } else {
-      // Keep every reply that's genuinely common; I need to be ready for it.
-      const kept = moves
-        .map((m) => ({ uci: m.uci, san: m.san, games: (m.white || 0) + (m.draws || 0) + (m.black || 0) }))
-        .filter((m) => m.games > 0)
-        .map((m) => ({ ...m, share: m.games / totalGames }))
-        .filter((m) => m.share >= settings.opponentBranchMinShare || m.games >= settings.opponentBranchMinGames)
-        .sort((a, b) => b.games - a.games);
-      node.opponentMoves = kept;
-      for (const m of kept) {
-        // No pre-check for the budget here — always create the child and
-        // let expand()'s own top-of-function guard handle it. That's what
-        // actually sets truncatedByCap; pre-checking here too would let
-        // some cap-truncated branches vanish silently (no child node at
-        // all) instead of being flagged like every other truncated leaf.
-        const childPath = [...uciPath, m.uci];
-        const child = { uci: m.uci, san: m.san, ply: node.ply + 1, games: 0, myMove: null, opponentMoves: null, children: {} };
-        node.children[m.uci] = child;
-        await expand(child, childPath);
-      }
-    }
-  }
-
-  await expand(root, []);
-
-  if (nodesFetched === 0 && root.fetchError) {
-    // A failure at the root means nothing at all was fetched — surface it
-    // as a real error instead of silently returning a hollow, empty tree.
-    throw new Error(root.fetchError);
-  }
-
-  return {
-    color,
-    computedAt: Date.now(),
-    monthWindow: { since, until },
-    monthsBack: resolved.monthsBack, // how far back we had to look to find an indexed month
-    params: { ...baseParams, moves: undefined },
-    nodesFetched,
-    nodesCapped,
-    nodesFailed,
-    firstFailureMessage,
-    rootDiagnostic,
-    timing: timing.count > 0 ? {
-      count: timing.count,
-      avgQueueMs: Math.round(timing.totalQueueMs / timing.count),
-      avgFetchMs: Math.round(timing.totalFetchMs / timing.count),
-      maxFetchMs: Math.round(timing.maxFetchMs),
-    } : null,
-    root,
-  };
 }
 
-export function isStale(repertoire, maxAgeHours) {
-  if (!repertoire) return true;
-  // Purely age-based now. It used to also compare the stored month against
-  // today's "preferred" last-completed month, but that's actively wrong
-  // now that the queried month can legitimately sit further back than
-  // preferred (indexing lag) — a repertoire would look stale the instant
-  // it finished building. A fresh build always re-resolves the available
-  // month anyway, so age alone is enough to pick up a newer month once
-  // Lichess actually has one indexed.
-  const ageMs = Date.now() - repertoire.computedAt;
-  return ageMs > maxAgeHours * 3600 * 1000;
+function cacheKeyFor(queryParams, month, uciPath) {
+  return `${month}::${queryParams.variant}::${queryParams.speeds}::${queryParams.ratings}::${uciPath.join(',')}`;
+}
+
+/**
+ * Fetches (or serves from cache) one position and returns it as a
+ * repertoire node: { games, myMove, opponentMoves }. Lazy — this is the
+ * only place a network request for opening data happens; quiz/browse call
+ * it exactly when they navigate to a position, not ahead of time.
+ *
+ * @param {string[]} uciPath moves from the start position, in UCI form
+ * @param {'white'|'black'} color which repertoire this is for
+ * @param {object} settings
+ * @param {{signal?: AbortSignal, onBeforeFetch?: () => void, cache?: {getCached, putCached}}} opts
+ *   onBeforeFetch fires synchronously, only when a real network request is
+ *   about to happen (not on a cache hit) — the hook for "hold on, fetching…"
+ *   UX. cache defaults to the real IndexedDB-backed one; tests inject a
+ *   fake in-memory implementation instead.
+ */
+export async function getPosition(uciPath, color, settings, opts = {}) {
+  const cache = opts.cache || { getCached, putCached };
+  const maxPlies = Number.isFinite(settings.maxPlies) ? settings.maxPlies : Infinity;
+  if (uciPath.length >= maxPlies) {
+    return { node: { games: 0, myMove: null, opponentMoves: null }, cacheHit: true, fetchedAt: null, cacheKey: null };
+  }
+
+  const queryParams = explorerQueryParams(settings);
+  const { month } = await resolveMonthCached(queryParams, settings.lichessToken, opts);
+  const key = cacheKeyFor(queryParams, month, uciPath);
+
+  const cached = await cache.getCached(key);
+  const maxAgeMs = (settings.repertoireMaxAgeHours || 24) * 3600 * 1000;
+  let raw, fetchedAt, cacheHit;
+  if (cached && Date.now() - cached.fetchedAt < maxAgeMs) {
+    raw = cached.data;
+    fetchedAt = cached.fetchedAt;
+    cacheHit = true;
+  } else {
+    opts.onBeforeFetch?.();
+    const url = buildExplorerUrl({ ...queryParams, since: month, until: month, play: uciPath.join(',') });
+    raw = await fetchExplorerRaw(url, { signal: opts.signal, token: settings.lichessToken });
+    await cache.putCached(key, raw);
+    fetchedAt = Date.now();
+    cacheHit = false;
+  }
+
+  const node = computeNodeFromRaw(raw, color, uciPath.length, settings);
+  return { node, cacheHit, fetchedAt, cacheKey: key };
 }

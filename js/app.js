@@ -1,5 +1,6 @@
-import { DEFAULT_SETTINGS, loadSettings, saveSettings, loadRepertoire, saveRepertoire } from './storage.js';
-import { buildRepertoire, isStale } from './explorer.js';
+import { DEFAULT_SETTINGS, loadSettings, saveSettings } from './storage.js';
+import { getPosition } from './explorer.js';
+import { getCacheStats, clearCache } from './positionCache.js';
 import { renderBoard } from './board.js';
 import * as speech from './speech.js';
 import { matchSpokenMove, sanToSpeech } from './chessUtil.js';
@@ -13,7 +14,7 @@ import { Chess } from './vendor/chess.esm.js';
 // devtools is actually running the latest code, and it also drives the
 // service worker's cache name (see sw.js) so updates actually take effect
 // instead of being served stale from the offline cache.
-export const APP_VERSION = 22;
+export const APP_VERSION = 23;
 
 const COLOR_OPTIONS = ['white', 'black'];
 const RATING_OPTIONS = ['1000', '1200', '1400', '1600', '1800', '2000', '2200', '2500'];
@@ -23,7 +24,6 @@ const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => Array.from(document.querySelectorAll(sel));
 
 let settings = loadSettings();
-const repertoires = { white: loadRepertoire('white'), black: loadRepertoire('black') };
 
 // ---------- debug / caption log ----------
 const logEntries = [];
@@ -77,6 +77,7 @@ $$('nav button').forEach((btn) => {
     $$('.view').forEach((v) => v.classList.remove('active'));
     $('#view-' + btn.dataset.view).classList.add('active');
     if (btn.dataset.view === 'browse') renderBrowse();
+    if (btn.dataset.view === 'setup') renderCacheStatus();
   });
 });
 
@@ -109,7 +110,7 @@ function fillSettingsForm() {
   $('#opponentBranchMinShare').value = Math.round(settings.opponentBranchMinShare * 100);
   $('#opponentBranchMinGames').value = settings.opponentBranchMinGames;
   $('#maxPlies').value = Number.isFinite(settings.maxPlies) ? settings.maxPlies : '';
-  $('#maxNodes').value = settings.maxNodes;
+  $('#repertoireMaxAgeHours').value = settings.repertoireMaxAgeHours;
   $('#alwaysReplayOnSuccess').checked = settings.alwaysReplayOnSuccess;
   $('#dimScreenDuringQuiz').checked = settings.dimScreenDuringQuiz;
   $('#showDebugLog').checked = readDebugPref();
@@ -146,11 +147,9 @@ function readSettingsForm() {
     minSampleSize: Number($('#minSampleSize').value) || DEFAULT_SETTINGS.minSampleSize,
     opponentBranchMinShare: (Number($('#opponentBranchMinShare').value) || 0) / 100,
     opponentBranchMinGames: Number($('#opponentBranchMinGames').value) || 0,
-    // Blank genuinely means "no ply cap" here, not "use the default" — the
-    // separate hard maxNodes cap (see explorer.js) is what actually bounds
-    // memory/network use, so there's no need to force a depth limit too.
+    // Blank genuinely means "no ply cap" here, not "use the default".
     maxPlies: $('#maxPlies').value.trim() === '' ? Infinity : Number($('#maxPlies').value),
-    maxNodes: Number($('#maxNodes').value) || DEFAULT_SETTINGS.maxNodes,
+    repertoireMaxAgeHours: Number($('#repertoireMaxAgeHours').value) || DEFAULT_SETTINGS.repertoireMaxAgeHours,
     alwaysReplayOnSuccess: $('#alwaysReplayOnSuccess').checked,
     dimScreenDuringQuiz: $('#dimScreenDuringQuiz').checked,
     voiceURI: $('#voiceSelect').value || null,
@@ -165,147 +164,30 @@ $('#save-settings').addEventListener('click', () => {
   saveSettings(settings);
   localStorage.setItem('chessrep.showDebug', $('#showDebugLog').checked ? '1' : '0');
   log('Settings saved.');
-  renderRepStatus();
 });
-
-// ---------- repertoire building ----------
-function renderRepStatus() {
-  const wrap = $('#rep-cards');
-  wrap.innerHTML = '';
-  for (const color of COLOR_OPTIONS) {
-    const rep = repertoires[color];
-    const div = document.createElement('div');
-    div.className = 'repcard';
-    if (!rep) {
-      div.innerHTML = `<span>${cap(color)}: not built yet</span>`;
-    } else {
-      const stale = isStale(rep, settings.repertoireMaxAgeHours);
-      const lines = countLines(rep.root);
-      const truncatedLines = countTruncatedLines(rep.root);
-      const failNote = rep.nodesFailed ? ` — ${rep.nodesFailed} position(s) failed to fetch` : '';
-      const truncNote = truncatedLines
-        ? ` — ${truncatedLines} of ${lines} line(s) cut short by the position budget, raise it in Setup for more`
-        : '';
-      const lagNote = rep.monthsBack > 1 ? ` (${rep.monthsBack} months back)` : '';
-      div.innerHTML = `<span>${cap(color)}: ${lines} line(s), ${rep.nodesFetched} positions fetched${rep.nodesCapped ? ' (capped)' : ''}${failNote}${truncNote}</span>
-        <span class="meta">${stale ? 'stale — ' : ''}window ${windowLabel(rep.monthWindow)}${lagNote}</span>`;
-    }
-    wrap.appendChild(div);
-  }
-}
-
-function countLines(node) {
-  if (!node.myMove && !node.opponentMoves) return 1;
-  if (node.myMove) {
-    const child = node.children[node.myMove.uci];
-    return child ? countLines(child) : 1;
-  }
-  let total = 0;
-  for (const m of node.opponentMoves || []) {
-    const child = node.children[m.uci];
-    total += child ? countLines(child) : 1;
-  }
-  return total || 1;
-}
-
-// Mirrors countLines, but only counts leaves cut short by the position
-// budget — an artificial stopping point, not a genuine end of theory.
-function countTruncatedLines(node) {
-  if (!node.myMove && !node.opponentMoves) return node.truncatedByCap ? 1 : 0;
-  if (node.myMove) {
-    const child = node.children[node.myMove.uci];
-    return child ? countTruncatedLines(child) : 0;
-  }
-  let total = 0;
-  for (const m of node.opponentMoves || []) {
-    const child = node.children[m.uci];
-    total += child ? countTruncatedLines(child) : 0;
-  }
-  return total;
-}
-
-function leafMessage(node) {
-  return node.truncatedByCap
-    ? 'Cut short by the position budget — real theory may well continue past here. Raise "Position budget" in Setup to see further.'
-    : 'End of prepared theory for this line.';
-}
 
 function cap(s) { return s[0].toUpperCase() + s.slice(1); }
 
-function windowLabel(monthWindow) {
-  return monthWindow.since === monthWindow.until ? monthWindow.since : `${monthWindow.since}→${monthWindow.until}`;
+// ---------- position cache status ----------
+async function renderCacheStatus() {
+  const el = $('#cache-stats');
+  const errBox = $('#cache-error');
+  errBox.style.display = 'none';
+  try {
+    const stats = await getCacheStats();
+    el.textContent = stats.count
+      ? `${stats.count} position(s) cached — oldest fetched ${new Date(stats.oldest).toLocaleString()}, newest ${new Date(stats.newest).toLocaleString()}.`
+      : 'No positions cached yet — they get fetched and stored the first time Browse or Quiz actually reach them.';
+  } catch (err) {
+    errBox.style.display = 'block';
+    errBox.textContent = `Could not read the position cache: ${err.message}`;
+  }
 }
 
-$('#build-both').addEventListener('click', async () => {
-  settings = readSettingsForm();
-  saveSettings(settings);
-  const buildBtn = $('#build-both');
-  const progressWrap = $('#build-progress-wrap');
-  const progressBar = $('#build-progress-bar');
-  const progressText = $('#build-progress-text');
-  const errBox = $('#build-error');
-  errBox.style.display = 'none';
-
-  if (!settings.lichessToken) {
-    errBox.style.display = 'block';
-    errBox.textContent = 'No Lichess API token set. Lichess now requires one for the opening explorer — create a free token (no scopes needed) at lichess.org/account/oauth/token/create and paste it into the "Lichess account" field above.';
-    return;
-  }
-
-  // Fetches happen off-screen at the bottom of a long settings page, so
-  // clicking Build gave no feedback near the button itself — it just looked
-  // frozen. Disable the button, scroll the status card into view, and show
-  // motion immediately (before the first position even comes back) instead
-  // of a static 0% bar.
-  buildBtn.disabled = true;
-  const originalBtnLabel = buildBtn.textContent;
-  buildBtn.textContent = 'Building…';
-  progressWrap.style.display = 'block';
-  progressWrap.classList.add('indeterminate');
-  $('#repertoire-status').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-
-  try {
-    for (const color of settings.colors) {
-      progressText.textContent = `Building ${color} repertoire…`;
-      progressBar.style.width = '0%';
-      try {
-        const rep = await buildRepertoire(color, settings, {
-          onProgress: ({ nodesFetched }) => {
-            progressWrap.classList.remove('indeterminate'); // first position landed — switch to a real percentage
-            const pct = Math.min(100, Math.round((nodesFetched / (settings.maxNodes || 300)) * 100));
-            progressBar.style.width = pct + '%';
-            progressText.textContent = `Building ${color} repertoire… ${nodesFetched} positions fetched`;
-          },
-        });
-        repertoires[color] = rep;
-        saveRepertoire(color, rep);
-        const failNote = rep.nodesFailed ? `, ${rep.nodesFailed} failed (first: ${rep.firstFailureMessage})` : '';
-        const lagNote = rep.monthsBack > 1 ? ` (had to look ${rep.monthsBack} months back — the most recent one(s) weren't indexed yet)` : '';
-        log(`Built ${color} repertoire: ${rep.nodesFetched} positions${failNote}, window ${windowLabel(rep.monthWindow)}${lagNote}.`);
-        if (rep.timing) {
-          log(`  timing: avg ${(rep.timing.avgFetchMs / 1000).toFixed(1)}s/request from Lichess (worst ${(rep.timing.maxFetchMs / 1000).toFixed(1)}s), avg ${rep.timing.avgQueueMs}ms waiting for a free slot on our end — ${rep.timing.avgQueueMs < 200 ? "so the server's response time is the bottleneck, not our own throttling" : "so we're mostly waiting on our own concurrency limit, not the server"}.`);
-        }
-        if (!rep.root.myMove && !rep.root.opponentMoves && rep.rootDiagnostic) {
-          const d = rep.rootDiagnostic;
-          log(`  ${color} root came back empty — totalGames=${d.totalGames}, movesReturned=${d.movesReturned}, topLevel=${JSON.stringify(d.topLevel)}, url=${d.url}`);
-          for (const p of d.probes || []) {
-            log(`  probe (${p.label}): ${p.error ? `error: ${p.error}` : `totalGames=${p.totalGames}, movesReturned=${p.movesReturned}`}, url=${p.url || '(n/a)'}`);
-          }
-        }
-      } catch (err) {
-        errBox.style.display = 'block';
-        errBox.textContent = `Failed to build ${color} repertoire: ${err.message}`;
-        log(`ERROR building ${color}: ${err.message}`);
-      }
-    }
-  } finally {
-    progressWrap.style.display = 'none';
-    progressWrap.classList.remove('indeterminate');
-    progressText.textContent = '';
-    buildBtn.disabled = false;
-    buildBtn.textContent = originalBtnLabel;
-    renderRepStatus();
-  }
+$('#clear-cache').addEventListener('click', async () => {
+  await clearCache();
+  log('Position cache cleared.');
+  await renderCacheStatus();
 });
 
 // ---------- browse view ----------
@@ -315,28 +197,18 @@ $$('input[name=browse-color]').forEach((r) => r.addEventListener('change', () =>
   browseColor = r.value; browsePath = []; renderBrowse();
 }));
 
-function currentBrowseNode() {
-  const rep = repertoires[browseColor];
-  if (!rep) return null;
-  let node = rep.root;
-  for (const step of browsePath) {
-    node = node.children[step.uci];
-    if (!node) break;
-  }
-  return node;
-}
+// Positions are fetched lazily now, so each navigation step is async. A
+// monotonic request id guards against a slow fetch landing after the user
+// has already navigated elsewhere (rather than trying to compare stale
+// path arrays by reference).
+let browseRequestId = 0;
 
-function renderBrowse() {
-  const rep = repertoires[browseColor];
+async function renderBrowse() {
   const boardWrap = $('#board-wrap');
   const breadcrumb = $('#browse-breadcrumb');
   const movelist = $('#browse-movelist');
-  if (!rep) {
-    boardWrap.innerHTML = '';
-    breadcrumb.textContent = '';
-    movelist.innerHTML = `<div class="hint">No ${browseColor} repertoire built yet — go to Setup.</div>`;
-    return;
-  }
+  const myRequestId = ++browseRequestId;
+
   const chess = new Chess();
   for (const step of browsePath) chess.move(step.san);
   renderBoard(boardWrap, chess.fen(), {
@@ -351,7 +223,6 @@ function renderBrowse() {
     el.addEventListener('click', () => { browsePath = browsePath.slice(0, Number(el.dataset.idx) + 1); renderBrowse(); });
   });
 
-  const node = currentBrowseNode();
   movelist.innerHTML = '';
   if (browsePath.length > 0) {
     const back = document.createElement('button');
@@ -360,7 +231,32 @@ function renderBrowse() {
     back.addEventListener('click', () => { browsePath = browsePath.slice(0, -1); renderBrowse(); });
     movelist.appendChild(back);
   }
-  if (!node) return;
+
+  if (!settings.lichessToken) {
+    movelist.innerHTML += `<div class="hint">No Lichess API token set — add one in Setup.</div>`;
+    return;
+  }
+
+  const loading = document.createElement('div');
+  loading.className = 'hint';
+  loading.textContent = 'Loading…';
+  movelist.appendChild(loading);
+
+  let result;
+  try {
+    result = await getPosition(browsePath.map((s) => s.uci), browseColor, settings, {
+      onBeforeFetch: () => { if (myRequestId === browseRequestId) loading.textContent = 'Fetching from Lichess…'; },
+    });
+  } catch (err) {
+    if (myRequestId !== browseRequestId) return;
+    loading.className = 'errbox';
+    loading.textContent = err.message;
+    return;
+  }
+  if (myRequestId !== browseRequestId) return;
+  loading.remove();
+
+  const node = result.node;
   if (node.myMove) {
     const btn = document.createElement('button');
     btn.className = 'movebtn mine';
@@ -375,9 +271,9 @@ function renderBrowse() {
       btn.addEventListener('click', () => { browsePath = [...browsePath, m]; renderBrowse(); });
       movelist.appendChild(btn);
     }
-    if (node.opponentMoves.length === 0) movelist.innerHTML += `<div class="hint">${leafMessage(node)}</div>`;
+    if (node.opponentMoves.length === 0) movelist.innerHTML += `<div class="hint">End of prepared theory for this line.</div>`;
   } else {
-    movelist.innerHTML = `<div class="hint">${leafMessage(node)}</div>`;
+    movelist.innerHTML += `<div class="hint">End of prepared theory for this line.</div>`;
   }
 }
 
@@ -488,18 +384,23 @@ async function enterQuiz() {
   await speakGuarded('Quiz.');
 }
 
+// Positions are fetched lazily, straight from Lichess, as the quiz reaches
+// them — there's no pre-built repertoire to check for existence up front
+// any more, just whether we're able to talk to Lichess at all.
+function makeGetNode(color, onFetching) {
+  return async (uciPath) => {
+    const { node } = await getPosition(uciPath, color, settings, { onBeforeFetch: onFetching });
+    return node;
+  };
+}
+
 $('#start-quiz').addEventListener('click', async () => {
   const quizMode = quizColorRadios.find((r) => r.checked).value; // 'white' | 'black' | 'both'
   const inputMethod = quizInputRadios.find((r) => r.checked).value; // 'voice' | 'manual'
-  const colorsNeeded = quizMode === 'both' ? ['white', 'black'] : [quizMode];
-  for (const c of colorsNeeded) {
-    const rep = repertoires[c];
-    if (!rep || (!rep.root.myMove && !rep.root.opponentMoves)) {
-      $('#quiz-mic-warn').textContent = quizMode === 'both'
-        ? `No usable ${c} repertoire — build both colors in Setup first.`
-        : `No usable ${c} repertoire — build one in Setup first.`;
-      return;
-    }
+
+  if (!settings.lichessToken) {
+    $('#quiz-mic-warn').textContent = 'No Lichess API token set — add one in Setup first.';
+    return;
   }
 
   if (inputMethod === 'manual') {
@@ -555,9 +456,9 @@ async function startVoiceQuiz(quizMode) {
         await speakGuarded(`Not quite. The move was ${sanSpoken(correctSan)}.`);
       }
     },
-    onLineEnd: async ({ missed, truncated }) => {
+    onLineEnd: async ({ missed }) => {
       if (missed) return;
-      await speakGuarded(truncated ? "That's as far as I've fetched — not necessarily the end of real theory." : 'Line complete.');
+      await speakGuarded('Line complete.');
     },
     onReplayStart: async () => {
       await speakGuarded("Let's run through that line again.");
@@ -567,10 +468,15 @@ async function startVoiceQuiz(quizMode) {
     },
   };
 
+  const onFetching = () => {
+    log('Fetching next position from Lichess…');
+    speakGuarded('One moment.');
+  };
+
   try {
     while (quizRunning) {
       const color = quizMode === 'both' ? (Math.random() < 0.5 ? 'white' : 'black') : quizMode;
-      const session = new QuizSession({ repertoire: repertoires[color], settings, color, handlers });
+      const session = new QuizSession({ getNode: makeGetNode(color, onFetching), settings, color, handlers });
       await session.playNextLine();
     }
   } catch (err) {
@@ -653,6 +559,12 @@ async function startManualQuiz(quizMode) {
     },
     onAwaitingUserMove: ({ fen, legalMoves }) => {
       manualCurrentFen = fen;
+      // A live fetch for this position may have left the status stuck on
+      // "Fetching…" — the fetch is done now, so replace it, but leave any
+      // more specific text (e.g. "Opponent played e5. Your move.") alone if
+      // the fetch was already served from cache and never touched it.
+      const statusEl = $('#manual-status');
+      if (statusEl.textContent === 'Fetching from Lichess…') statusEl.textContent = 'Your move.';
       renderManualMoveList(legalMoves);
       return new Promise((resolve) => {
         manualPendingResolve = (san) => resolve(san);
@@ -669,11 +581,9 @@ async function startManualQuiz(quizMode) {
       }
       $('#manual-movelist').innerHTML = '';
     },
-    onLineEnd: async ({ missed, truncated }) => {
+    onLineEnd: async ({ missed }) => {
       if (missed) return;
-      $('#manual-status').textContent = truncated
-        ? "That's as far as I've fetched — not necessarily the end of real theory. Raise the position budget in Setup for more."
-        : 'Line complete.';
+      $('#manual-status').textContent = 'Line complete.';
     },
     onReplayStart: async () => {
       $('#manual-status').textContent = "Replaying that line for memorization…";
@@ -681,10 +591,12 @@ async function startManualQuiz(quizMode) {
     onReplayEnd: async () => {},
   };
 
+  const onFetching = () => { $('#manual-status').textContent = 'Fetching from Lichess…'; };
+
   try {
     while (manualRunning) {
       const color = quizMode === 'both' ? (Math.random() < 0.5 ? 'white' : 'black') : quizMode;
-      const session = new QuizSession({ repertoire: repertoires[color], settings, color, handlers });
+      const session = new QuizSession({ getNode: makeGetNode(color, onFetching), settings, color, handlers });
       await session.playNextLine();
     }
   } catch (err) {
@@ -736,7 +648,7 @@ $('#manual-ask-btn').addEventListener('click', () => {
 // ---------- init ----------
 $('#app-version').textContent = `v${APP_VERSION}`;
 fillSettingsForm();
-renderRepStatus();
+renderCacheStatus();
 log(`App ready (v${APP_VERSION}).`);
 
 if ('serviceWorker' in navigator) {

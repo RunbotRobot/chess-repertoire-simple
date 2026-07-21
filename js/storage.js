@@ -1,5 +1,7 @@
-// Local persistence: settings, cached repertoire trees, per-line mastery stats.
-// Everything lives in localStorage — this app has no backend.
+// Local persistence: settings and per-line mastery stats live in
+// localStorage. Cached opening positions live separately in IndexedDB (see
+// positionCache.js) — there could be thousands of them over time, well
+// past what localStorage's quota comfortably holds.
 
 const NS = 'chessrep.';
 
@@ -25,11 +27,10 @@ export const DEFAULT_SETTINGS = {
   ratingBands: ['1600', '1800', '2000'], // lichess explorer rating buckets to pool together
   speeds: ['blitz', 'rapid'],
   minSampleSize: 20,     // a node needs at least this many games to be trusted/expanded
-  maxPlies: 40,          // hard safety cap on repertoire depth (20 full moves); null/Infinity = no cap
-  maxNodes: 300,         // hard cap on total positions fetched per repertoire — the real memory/network bound
+  maxPlies: 40,          // hard safety cap on how deep a single quiz line can go; null/Infinity = no cap
   opponentBranchMinShare: 0.05, // ignore opponent replies played less than 5% of the time at a node
   opponentBranchMinGames: 15,   // ...unless they still clear this absolute game-count floor
-  repertoireMaxAgeHours: 24,    // recompute if the cached tree is older than this
+  repertoireMaxAgeHours: 24,    // a cached position older than this gets transparently refetched next time it's needed
   alwaysReplayOnSuccess: false, // if true, drill every line twice, not just missed ones
   dimScreenDuringQuiz: true,
   voiceURI: null,        // chosen SpeechSynthesis voice, if any
@@ -43,15 +44,6 @@ export function loadSettings() {
 
 export function saveSettings(settings) {
   writeJSON('settings', settings);
-}
-
-// Cached repertoire tree per color: { computedAt, monthWindow: {since, until}, params, root }
-export function loadRepertoire(color) {
-  return readJSON('repertoire.' + color, null);
-}
-
-export function saveRepertoire(color, data) {
-  writeJSON('repertoire.' + color, data);
 }
 
 // Mastery stats keyed by a path id (sequence of UCI moves joined with space).
