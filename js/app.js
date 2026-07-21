@@ -13,7 +13,7 @@ import { Chess } from './vendor/chess.esm.js';
 // devtools is actually running the latest code, and it also drives the
 // service worker's cache name (see sw.js) so updates actually take effect
 // instead of being served stale from the offline cache.
-export const APP_VERSION = 20;
+export const APP_VERSION = 21;
 
 const COLOR_OPTIONS = ['white', 'black'];
 const RATING_OPTIONS = ['1000', '1200', '1400', '1600', '1800', '2000', '2200', '2500'];
@@ -186,8 +186,9 @@ function renderRepStatus() {
       const truncNote = truncatedLines
         ? ` — ${truncatedLines} of ${lines} line(s) cut short by the position budget, raise it in Setup for more`
         : '';
+      const lagNote = rep.monthsBack > 1 ? ` (${rep.monthsBack} months back)` : '';
       div.innerHTML = `<span>${cap(color)}: ${lines} line(s), ${rep.nodesFetched} positions fetched${rep.nodesCapped ? ' (capped)' : ''}${failNote}${truncNote}</span>
-        <span class="meta">${stale ? 'stale — ' : ''}window ${windowLabel(rep.monthWindow)}</span>`;
+        <span class="meta">${stale ? 'stale — ' : ''}window ${windowLabel(rep.monthWindow)}${lagNote}</span>`;
     }
     wrap.appendChild(div);
   }
@@ -279,7 +280,8 @@ $('#build-both').addEventListener('click', async () => {
         repertoires[color] = rep;
         saveRepertoire(color, rep);
         const failNote = rep.nodesFailed ? `, ${rep.nodesFailed} failed (first: ${rep.firstFailureMessage})` : '';
-        log(`Built ${color} repertoire: ${rep.nodesFetched} positions${failNote}, window ${windowLabel(rep.monthWindow)}.`);
+        const lagNote = rep.monthsBack > 1 ? ` (had to look ${rep.monthsBack} months back — the most recent one(s) weren't indexed yet)` : '';
+        log(`Built ${color} repertoire: ${rep.nodesFetched} positions${failNote}, window ${windowLabel(rep.monthWindow)}${lagNote}.`);
         if (!rep.root.myMove && !rep.root.opponentMoves && rep.rootDiagnostic) {
           const d = rep.rootDiagnostic;
           log(`  ${color} root came back empty — totalGames=${d.totalGames}, movesReturned=${d.movesReturned}, topLevel=${JSON.stringify(d.topLevel)}, url=${d.url}`);

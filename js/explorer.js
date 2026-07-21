@@ -25,9 +25,39 @@ function monthString(monthOffset, from = new Date()) {
   return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
 }
 
+// The "preferred" month if everything were indexed instantly. What actually
+// gets *queried* is resolved separately by resolveAvailableMonth(), which
+// may fall back further back in time — isStale() deliberately does NOT
+// compare against this (see its comment), so this is exported purely as a
+// building block / for display, not as a source of truth for freshness.
 export function monthWindow() {
   const lastCompletedMonth = monthString(-1);
   return { since: lastCompletedMonth, until: lastCompletedMonth };
+}
+
+const MAX_MONTHS_LOOKBACK = 4;
+
+/**
+ * Finds the most recent month that actually has queryable data, since a
+ * freshly-completed calendar month isn't necessarily indexed yet (confirmed
+ * live: one month back returned 0 games, two months back returned real
+ * data — an indexing lag, not a bug in the query). Tries the last
+ * completed month first, then progressively further back, so this adapts
+ * automatically if that lag changes rather than relying on a guessed fixed
+ * offset that could quietly break again later.
+ */
+async function resolveAvailableMonth(probeParams, token, opts = {}) {
+  const attempts = [];
+  for (let monthsBack = 1; monthsBack <= MAX_MONTHS_LOOKBACK; monthsBack++) {
+    const month = monthString(-monthsBack);
+    const url = buildExplorerUrl({ ...probeParams, since: month, until: month });
+    const data = await fetchExplorerRaw(url, { signal: opts.signal, token });
+    const moves = Array.isArray(data.moves) ? data.moves : [];
+    const totalGames = moves.reduce((s, m) => s + (m.white || 0) + (m.draws || 0) + (m.black || 0), 0);
+    attempts.push({ month, monthsBack, totalGames });
+    if (totalGames > 0) return { month, monthsBack, attempts };
+  }
+  return { month: null, monthsBack: null, attempts };
 }
 
 class RateLimiter {
@@ -126,7 +156,6 @@ async function fetchExplorerRaw(url, { signal, token } = {}) {
  * @param {{onProgress?: (n:{nodesFetched:number})=>void, signal?: AbortSignal}} opts
  */
 export async function buildRepertoire(color, settings, opts = {}) {
-  const { since, until } = monthWindow();
   const limiter = new RateLimiter(4, 60);
   // "No depth limit" round-trips through JSON as null (Infinity isn't
   // JSON-safe), and `ply >= null` coerces null to 0 — silently terminating
@@ -139,18 +168,25 @@ export async function buildRepertoire(color, settings, opts = {}) {
   let rootDiagnostic = null;
   const maxNodes = settings.maxNodes || 300;
 
-  const baseParams = {
+  const probeParams = {
     variant: 'standard',
     speeds: settings.speeds.join(','),
     ratings: settings.ratingBands.join(','),
-    since,
-    until,
     moves: 12, // ask lichess for up to 12 candidate moves per position
     // topGames/recentGames deliberately omitted (left at Lichess's default)
     // rather than forced to 0 — we never read that data, so there's no
     // reason to send a non-default value that could interact oddly with a
     // recently-changed, newly-authenticated endpoint.
   };
+
+  const resolved = await resolveAvailableMonth(probeParams, settings.lichessToken, opts);
+  if (!resolved.month) {
+    const tried = resolved.attempts.map((a) => `${a.month} (${a.totalGames} games)`).join(', ');
+    throw new Error(`No month in the last ${MAX_MONTHS_LOOKBACK} had any games for these filters — tried ${tried}. The filters (rating/speed) may be too narrow, or something is still wrong with the query.`);
+  }
+  const { since, until } = { since: resolved.month, until: resolved.month };
+
+  const baseParams = { ...probeParams, since, until };
 
   async function fetchNode(uciPath) {
     const url = buildExplorerUrl({ ...baseParams, play: uciPath.join(',') });
@@ -288,6 +324,7 @@ export async function buildRepertoire(color, settings, opts = {}) {
     color,
     computedAt: Date.now(),
     monthWindow: { since, until },
+    monthsBack: resolved.monthsBack, // how far back we had to look to find an indexed month
     params: { ...baseParams, moves: undefined },
     nodesFetched,
     nodesCapped,
@@ -300,8 +337,13 @@ export async function buildRepertoire(color, settings, opts = {}) {
 
 export function isStale(repertoire, maxAgeHours) {
   if (!repertoire) return true;
+  // Purely age-based now. It used to also compare the stored month against
+  // today's "preferred" last-completed month, but that's actively wrong
+  // now that the queried month can legitimately sit further back than
+  // preferred (indexing lag) — a repertoire would look stale the instant
+  // it finished building. A fresh build always re-resolves the available
+  // month anyway, so age alone is enough to pick up a newer month once
+  // Lichess actually has one indexed.
   const ageMs = Date.now() - repertoire.computedAt;
-  if (ageMs > maxAgeHours * 3600 * 1000) return true;
-  const { since, until } = monthWindow();
-  return repertoire.monthWindow?.since !== since || repertoire.monthWindow?.until !== until;
+  return ageMs > maxAgeHours * 3600 * 1000;
 }

@@ -7,7 +7,7 @@
 // worker (and thus only re-fetches the shell) when sw.js's own bytes
 // change — if this string doesn't change, updates to app.js/explorer.js/etc.
 // silently never reach clients, no matter how many times they're deployed.
-const CACHE = 'opening-drill-v20';
+const CACHE = 'opening-drill-v21';
 const SHELL_FILES = [
   './',
   './index.html',
