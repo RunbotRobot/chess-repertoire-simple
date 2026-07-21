@@ -6,25 +6,27 @@
 // every reply that's actually common — I need to be ready for whichever one
 // they play, weighted by how often it's actually played.
 //
-// Data-source caveat: Lichess's explorer only filters by month (`since`/`until`
-// are YYYY-MM), not by day. Rather than approximate a rolling 30-day window,
-// the repertoire is scoped to the last fully-completed month plus whatever's
-// available of the current one, and switches over on the 1st — see
-// monthWindow(). Deliberately NOT since === until === the current month:
-// that returned zero games in practice (confirmed via rootDiagnostic), most
-// likely because Lichess hasn't finished indexing an in-progress month yet
-// — possibly compounded by `until` being an exclusive bound, which would
-// make any since === until query a zero-width, always-empty range. Anchoring
-// `since` to the previous month sidesteps both risks at once: it's always a
-// genuinely non-degenerate two-value range, and it never depends solely on
-// the still-accumulating current month having data yet.
+// Data-source caveat: the repertoire is scoped to the last fully-completed
+// calendar month plus whatever's available of the current one, switching
+// over on the 1st — see monthWindow(). Getting there took a few rounds of
+// live debugging (see git history), landing on the actual cause: `since`
+// as a bare YYYY-MM (documented format, and what the old lichess.ovh
+// explorer wanted) silently breaks the query — confirmed live: `since`
+// alone returned 0 games, `until` alone returned the exact same count as
+// no filter at all, and dropping both returned real data. That's the
+// signature of a date parse failure defaulting to "exclude everything"
+// for a lower bound and "no effective ceiling" for an upper one. Full
+// `YYYY-MM-DD` dates — matching the format lichess.org's own game search
+// UI uses — fixed it. `until` is set to tomorrow rather than today, as a
+// defensive buffer in case it turns out to be an exclusive bound.
 const EXPLORER_URL = 'https://explorer.lichess.org/lichess';
 
 export function monthWindow() {
   const now = new Date();
-  const prev = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1));
-  const fmt = (d) => `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
-  return { since: fmt(prev), until: fmt(now) };
+  const prevMonthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1));
+  const tomorrow = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+  const fmt = (d) => `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
+  return { since: fmt(prevMonthStart), until: fmt(tomorrow) };
 }
 
 class RateLimiter {

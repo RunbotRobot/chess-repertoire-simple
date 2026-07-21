@@ -39,17 +39,19 @@ require a real origin).
   exchange) and untested from this dev environment — ask if you'd rather
   have that.
 - **The window is the last completed month plus the current one, not a
-  rolling 30 days.** Lichess's explorer API only accepts `since`/`until` as
-  `YYYY-MM`, not a day. It also, in practice, returned zero games when
-  queried as a single month equal to the current, still-in-progress one
-  (`since === until === this month`) — most likely because Lichess hasn't
-  finished indexing an in-progress month yet, possibly compounded by
-  `until` being an exclusive bound (which would make any `since === until`
-  query a permanently empty range, not just for the current month). So
-  `since` is anchored to the previous calendar month and `until` to the
-  current one — always a genuine two-value range, never dependent on the
-  still-accumulating current month having data yet. This still changes
-  exactly once a month, on the 1st, per the original ask.
+  rolling 30 days.** `since` is anchored to the 1st of the previous
+  calendar month, `until` to tomorrow — always a genuine, non-degenerate
+  range, and it changes over automatically on the 1st, per the original
+  ask. Getting the date params themselves right took real live debugging
+  (see git history for the full trail): despite `since`/`until` being
+  documented as bare `YYYY-MM`, that format silently broke `since`
+  specifically — confirmed live by isolating it with automatic probes:
+  `since` alone returned 0 games, `until` alone returned the *exact same*
+  count as sending no date filter at all, and dropping both returned real
+  data. That's the signature of a date-parse failure defaulting to
+  "exclude everything" for a lower bound and "no effective ceiling" for an
+  upper one. Full `YYYY-MM-DD` dates — the format lichess.org's own game
+  search page uses — fixed it.
 - **The screen never actually turns off.** iOS/Android suspend JavaScript
   (and the microphone) the instant the screen truly locks — no web app can
   listen through that. Instead, quiz mode keeps the screen *on* via the Wake
