@@ -97,7 +97,14 @@ async function fetchExplorerRaw(url, { signal, token } = {}) {
       continue;
     }
     if (!res.ok) {
-      throw new Error(`Lichess explorer request failed: HTTP ${res.status} for ${url}`);
+      // The body almost always explains exactly what's wrong (e.g. a
+      // rejected param format) — surfacing HTTP 400 without it was pure
+      // guesswork. Every 4xx/5xx we haven't special-cased above lands here.
+      let bodySnippet = '';
+      try {
+        bodySnippet = (await res.text()).slice(0, 300);
+      } catch { /* body may already be consumed or unreadable; the status code alone still gets thrown below */ }
+      throw new Error(`Lichess explorer request failed: HTTP ${res.status} for ${url}${bodySnippet ? ` — response: ${bodySnippet}` : ''}`);
     }
     const text = await res.text();
     // The endpoint returns a single JSON object for position queries; guard
