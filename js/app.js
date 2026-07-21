@@ -1,5 +1,5 @@
 import { DEFAULT_SETTINGS, loadSettings, saveSettings } from './storage.js';
-import { getPosition } from './explorer.js';
+import { getPosition, peekPosition } from './explorer.js';
 import { getCacheStats, clearCache } from './positionCache.js';
 import { renderBoard } from './board.js';
 import * as speech from './speech.js';
@@ -14,7 +14,7 @@ import { Chess } from './vendor/chess.esm.js';
 // devtools is actually running the latest code, and it also drives the
 // service worker's cache name (see sw.js) so updates actually take effect
 // instead of being served stale from the offline cache.
-export const APP_VERSION = 23;
+export const APP_VERSION = 24;
 
 const COLOR_OPTIONS = ['white', 'black'];
 const RATING_OPTIONS = ['1000', '1200', '1400', '1600', '1800', '2000', '2200', '2500'];
@@ -110,7 +110,7 @@ function fillSettingsForm() {
   $('#opponentBranchMinShare').value = Math.round(settings.opponentBranchMinShare * 100);
   $('#opponentBranchMinGames').value = settings.opponentBranchMinGames;
   $('#maxPlies').value = Number.isFinite(settings.maxPlies) ? settings.maxPlies : '';
-  $('#repertoireMaxAgeHours').value = settings.repertoireMaxAgeHours;
+  $('#repertoireMaxAgeMonths').value = settings.repertoireMaxAgeMonths;
   $('#alwaysReplayOnSuccess').checked = settings.alwaysReplayOnSuccess;
   $('#dimScreenDuringQuiz').checked = settings.dimScreenDuringQuiz;
   $('#showDebugLog').checked = readDebugPref();
@@ -149,7 +149,7 @@ function readSettingsForm() {
     opponentBranchMinGames: Number($('#opponentBranchMinGames').value) || 0,
     // Blank genuinely means "no ply cap" here, not "use the default".
     maxPlies: $('#maxPlies').value.trim() === '' ? Infinity : Number($('#maxPlies').value),
-    repertoireMaxAgeHours: Number($('#repertoireMaxAgeHours').value) || DEFAULT_SETTINGS.repertoireMaxAgeHours,
+    repertoireMaxAgeMonths: Number($('#repertoireMaxAgeMonths').value) || DEFAULT_SETTINGS.repertoireMaxAgeMonths,
     alwaysReplayOnSuccess: $('#alwaysReplayOnSuccess').checked,
     dimScreenDuringQuiz: $('#dimScreenDuringQuiz').checked,
     voiceURI: $('#voiceSelect').value || null,
@@ -197,10 +197,11 @@ $$('input[name=browse-color]').forEach((r) => r.addEventListener('change', () =>
   browseColor = r.value; browsePath = []; renderBrowse();
 }));
 
-// Positions are fetched lazily now, so each navigation step is async. A
-// monotonic request id guards against a slow fetch landing after the user
-// has already navigated elsewhere (rather than trying to compare stale
-// path arrays by reference).
+// Browse only ever shows what's already cached — it never talks to
+// Lichess itself; only quizzing does that (see explorer.js's header
+// comment on the Browse/quiz split). A monotonic request id still guards
+// against a slow IndexedDB read landing after the user has already
+// navigated elsewhere.
 let browseRequestId = 0;
 
 async function renderBrowse() {
@@ -232,31 +233,14 @@ async function renderBrowse() {
     movelist.appendChild(back);
   }
 
-  if (!settings.lichessToken) {
-    movelist.innerHTML += `<div class="hint">No Lichess API token set — add one in Setup.</div>`;
-    return;
-  }
-
-  const loading = document.createElement('div');
-  loading.className = 'hint';
-  loading.textContent = 'Loading…';
-  movelist.appendChild(loading);
-
-  let result;
-  try {
-    result = await getPosition(browsePath.map((s) => s.uci), browseColor, settings, {
-      onBeforeFetch: () => { if (myRequestId === browseRequestId) loading.textContent = 'Fetching from Lichess…'; },
-    });
-  } catch (err) {
-    if (myRequestId !== browseRequestId) return;
-    loading.className = 'errbox';
-    loading.textContent = err.message;
-    return;
-  }
+  const { node, cached } = await peekPosition(browsePath.map((s) => s.uci), browseColor, settings);
   if (myRequestId !== browseRequestId) return;
-  loading.remove();
 
-  const node = result.node;
+  if (!cached) {
+    movelist.innerHTML += `<div class="hint">Not fetched yet. Positions are only fetched while quizzing — run a quiz with these rating/speed filters to reach and cache this one.</div>`;
+    return;
+  }
+
   if (node.myMove) {
     const btn = document.createElement('button');
     btn.className = 'movebtn mine';
@@ -286,7 +270,7 @@ const quizModeLabel = $('#quiz-mode-label');
 function updateQuizInputHint() {
   const val = quizInputRadios.find((r) => r.checked).value;
   $('#quiz-input-hint').textContent = val === 'manual'
-    ? 'Tap a move to answer. Tap "Analyze" any time to check the engine\'s opinion on the position without leaving the quiz — no mic or speaker involved.'
+    ? 'Click a piece, then click where it goes. Tap "Analyze" any time to check the engine\'s opinion on the position without leaving the quiz — no mic or speaker involved.'
     : 'Say "Analyze" any time during the quiz to pause and ask the engine about the position. Say "Quiz" to resume. The screen will go black and stay awake — tap it to peek at the caption log.';
 }
 quizInputRadios.forEach((r) => r.addEventListener('change', updateQuizInputHint));
@@ -513,27 +497,47 @@ let manualRunning = false;
 let manualPendingResolve = null;
 let manualCurrentFen = new Chess().fen();
 let manualOrientation = 'white';
+let manualLegalMoves = [];   // legal moves for the position currently awaiting an answer, or [] otherwise
+let manualSelectedSquare = null;
+let manualLastMove = null;   // {from, to} to highlight, independent of click-to-move selection
 
-function renderManualBoard(fen, lastMove) {
-  renderBoard($('#manual-board-wrap'), fen, { orientation: manualOrientation, lastMove });
-}
-
-function renderManualMoveList(legalMoves) {
-  const wrap = $('#manual-movelist');
-  wrap.innerHTML = '';
-  for (const m of legalMoves) {
-    const btn = document.createElement('button');
-    btn.className = 'movebtn';
-    btn.textContent = m.san;
-    btn.addEventListener('click', () => {
-      if (!manualPendingResolve) return;
+// Click-to-move: click a square with one of your pieces to select it (and
+// see its legal destinations marked), then click a destination square to
+// play it. Clicking the selected square again deselects; clicking another
+// of your own pieces re-selects instead of failing silently.
+function handleManualSquareClick(square) {
+  if (!manualPendingResolve) return; // not currently awaiting a move
+  if (manualSelectedSquare) {
+    if (square === manualSelectedSquare) {
+      manualSelectedSquare = null;
+      renderManualBoard(manualCurrentFen);
+      return;
+    }
+    const matches = manualLegalMoves.filter((m) => m.from === manualSelectedSquare && m.to === square);
+    if (matches.length > 0) {
+      // A pawn reaching the last rank offers one legal move per promotion
+      // choice, all sharing this from/to — always take the queen rather
+      // than showing an underpromotion picker; good enough for opening
+      // drilling, where underpromotions essentially never come up.
+      const move = matches.find((m) => m.promotion === 'q') || matches[0];
       const resolve = manualPendingResolve;
       manualPendingResolve = null;
-      wrap.innerHTML = '';
-      resolve(m.san);
-    });
-    wrap.appendChild(btn);
+      manualSelectedSquare = null;
+      resolve(move.san);
+      return;
+    }
   }
+  const hasMovesFrom = manualLegalMoves.some((m) => m.from === square);
+  manualSelectedSquare = hasMovesFrom ? square : null;
+  renderManualBoard(manualCurrentFen);
+}
+
+function renderManualBoard(fen, lastMove) {
+  if (lastMove !== undefined) manualLastMove = lastMove;
+  const interactive = manualPendingResolve
+    ? { legalMoves: manualLegalMoves, selectedSquare: manualSelectedSquare, onSquareClick: handleManualSquareClick }
+    : null;
+  renderBoard($('#manual-board-wrap'), fen, { orientation: manualOrientation, lastMove: manualLastMove, interactive });
 }
 
 async function startManualQuiz(quizMode) {
@@ -541,7 +545,6 @@ async function startManualQuiz(quizMode) {
   $('#manual-quiz-panel').style.display = 'block';
   $('#manual-analysis-panel').style.display = 'none';
   $('#manual-status').textContent = 'Starting…';
-  $('#manual-movelist').innerHTML = '';
   engine = engine || new Engine();
   if (!analysisSession) analysisSession = new AnalysisSession(engine);
   engine.init().catch((err) => log(`Engine init failed (analysis will be unavailable): ${err.message}`));
@@ -549,37 +552,45 @@ async function startManualQuiz(quizMode) {
   const handlers = {
     onLineStart: async ({ color }) => {
       manualOrientation = color;
+      manualLegalMoves = [];
+      manualSelectedSquare = null;
+      manualLastMove = null;
       $('#manual-status').textContent = quizMode === 'both' ? `New line — ${cap(color)} to move first.` : 'New line.';
     },
     onOpponentMove: async ({ san, uci, fen }) => {
       manualCurrentFen = fen;
+      manualLegalMoves = [];
+      manualSelectedSquare = null;
       renderManualBoard(fen, { from: uci.slice(0, 2), to: uci.slice(2, 4) });
       $('#manual-status').textContent = `Opponent played ${san}. Your move.`;
-      $('#manual-movelist').innerHTML = '';
     },
     onAwaitingUserMove: ({ fen, legalMoves }) => {
       manualCurrentFen = fen;
+      manualLegalMoves = legalMoves;
+      manualSelectedSquare = null;
       // A live fetch for this position may have left the status stuck on
       // "Fetching…" — the fetch is done now, so replace it, but leave any
       // more specific text (e.g. "Opponent played e5. Your move.") alone if
       // the fetch was already served from cache and never touched it.
       const statusEl = $('#manual-status');
       if (statusEl.textContent === 'Fetching from Lichess…') statusEl.textContent = 'Your move.';
-      renderManualMoveList(legalMoves);
       return new Promise((resolve) => {
         manualPendingResolve = (san) => resolve(san);
+        renderManualBoard(manualCurrentFen); // now interactive, since manualPendingResolve is set
         if (!manualRunning) resolve(ABORT);
       });
     },
     onResult: async ({ correct, correctSan, correctUci, fen }) => {
       manualCurrentFen = fen;
+      manualLegalMoves = [];
+      manualSelectedSquare = null;
       if (correct) {
         renderManualBoard(fen, { from: correctUci.slice(0, 2), to: correctUci.slice(2, 4) });
         $('#manual-status').textContent = `Correct — ${correctSan}.`;
       } else {
+        renderManualBoard(fen); // turns off interactivity now that manualPendingResolve is cleared; lastMove unchanged
         $('#manual-status').textContent = `Not quite. The move was ${correctSan}.`;
       }
-      $('#manual-movelist').innerHTML = '';
     },
     onLineEnd: async ({ missed }) => {
       if (missed) return;
@@ -610,9 +621,10 @@ async function startManualQuiz(quizMode) {
 $('#manual-stop-btn').addEventListener('click', () => {
   manualRunning = false;
   if (manualPendingResolve) { const r = manualPendingResolve; manualPendingResolve = null; r(ABORT); }
+  manualLegalMoves = [];
+  manualSelectedSquare = null;
   $('#manual-quiz-panel').style.display = 'none';
   $('#manual-analysis-panel').style.display = 'none';
-  $('#manual-movelist').innerHTML = '';
   log('Quiz stopped.');
 });
 

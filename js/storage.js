@@ -30,7 +30,7 @@ export const DEFAULT_SETTINGS = {
   maxPlies: 40,          // hard safety cap on how deep a single quiz line can go; null/Infinity = no cap
   opponentBranchMinShare: 0.05, // ignore opponent replies played less than 5% of the time at a node
   opponentBranchMinGames: 15,   // ...unless they still clear this absolute game-count floor
-  repertoireMaxAgeHours: 24,    // a cached position older than this gets transparently refetched next time it's needed
+  repertoireMaxAgeMonths: 1,    // a cached position older than this gets transparently refetched next time it's needed; decimals allowed (e.g. 0.5)
   alwaysReplayOnSuccess: false, // if true, drill every line twice, not just missed ones
   dimScreenDuringQuiz: true,
   voiceURI: null,        // chosen SpeechSynthesis voice, if any
@@ -65,4 +65,19 @@ export function recordLineResult(color, pathId, missed) {
   stats[pathId] = s;
   saveLineStats(color, stats);
   return s;
+}
+
+// Which Lichess-indexed calendar month explorer.js last resolved to, per
+// (ratings, speeds) query signature — persisted (not just kept in memory)
+// so Browse can find previously-cached positions after a fresh page load
+// without itself making a network call to re-resolve the month; quizzing is
+// what actually (re)does that resolution and keeps this up to date.
+export function loadResolvedMonth(signature) {
+  return readJSON('resolvedMonths', {})[signature] || null;
+}
+
+export function saveResolvedMonth(signature, entry) {
+  const all = readJSON('resolvedMonths', {});
+  all[signature] = entry;
+  writeJSON('resolvedMonths', all);
 }

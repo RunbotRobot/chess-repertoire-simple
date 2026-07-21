@@ -165,9 +165,9 @@
           </div>
         </div>
         <div class="field">
-          <label for="repertoireMaxAgeHours">Cache freshness (hours)</label>
-          <input type="number" id="repertoireMaxAgeHours" min="1" step="1">
-          <div class="hint">A cached position older than this gets transparently refetched next time it's actually needed.</div>
+          <label for="repertoireMaxAgeMonths">Cache freshness (months)</label>
+          <input type="number" id="repertoireMaxAgeMonths" min="0.1" step="0.1">
+          <div class="hint">A cached position older than this gets transparently refetched next time it's actually needed. Decimals are fine (e.g. 0.5 for twice a month).</div>
         </div>
       </div>
 
@@ -258,7 +258,6 @@
         <h3>Quiz</h3>
         <div id="manual-board-wrap" style="max-width:320px;margin:0 auto 10px;"></div>
         <div class="hint" id="manual-status">—</div>
-        <div class="movelist" id="manual-movelist" style="margin-top:10px;"></div>
 
         <div id="manual-analysis-panel" style="display:none;margin-top:10px;padding-top:10px;border-top:1px solid var(--line);">
           <div class="row">

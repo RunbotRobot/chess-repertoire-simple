@@ -19,7 +19,7 @@
 // data regardless of which repertoire found it, and NOT by scoring settings
 // (minSampleSize etc.), which are applied fresh on every read instead.
 // "Periodic re-fetching" falls out of this for free: a cached entry older
-// than repertoireMaxAgeHours is transparently refetched next time it's
+// than repertoireMaxAgeMonths is transparently refetched next time it's
 // actually needed, rather than needing a separate background sweep.
 //
 // Data-source caveat: the repertoire is scoped to a single calendar
@@ -28,7 +28,15 @@
 // `since`/`until` must be sent as an identical single YYYY-MM value; two
 // different months (or one omitted) reliably returns 0 games. Both findings
 // came from live probing — see git history for the full trail.
+//
+// Browse vs. quiz split: quizzing (getPosition) is the only thing that ever
+// talks to the network — it fetches, caches, and (re)resolves the queryable
+// month. Browse (peekPosition) only ever reads what's already cached, using
+// the last-resolved month persisted in localStorage (see
+// storage.js's loadResolvedMonth) rather than re-resolving it itself, so
+// opening the Browse tab never makes a request of its own.
 import { getCached, putCached } from './positionCache.js';
+import { loadResolvedMonth, saveResolvedMonth } from './storage.js';
 
 const EXPLORER_URL = 'https://explorer.lichess.org/lichess';
 
@@ -78,8 +86,12 @@ async function resolveAvailableMonth(probeParams, token, opts = {}) {
 // cheap and avoids any staleness edge cases around month boundaries.
 const monthResolutionCache = new Map();
 
+function monthSignature(probeParams) {
+  return `${probeParams.ratings}|${probeParams.speeds}`;
+}
+
 async function resolveMonthCached(probeParams, token, opts = {}) {
-  const key = `${probeParams.ratings}|${probeParams.speeds}`;
+  const key = monthSignature(probeParams);
   const cached = monthResolutionCache.get(key);
   if (cached && Date.now() - cached.resolvedAt < 12 * 3600 * 1000) return cached;
   const resolved = await resolveAvailableMonth(probeParams, token, opts);
@@ -89,7 +101,21 @@ async function resolveMonthCached(probeParams, token, opts = {}) {
   }
   const entry = { ...resolved, resolvedAt: Date.now() };
   monthResolutionCache.set(key, entry);
+  saveResolvedMonth(key, { month: entry.month, resolvedAt: entry.resolvedAt });
   return entry;
+}
+
+// Browse's read-only counterpart to resolveMonthCached: never touches the
+// network, just returns whichever month quizzing last resolved to (in
+// memory if this page load has already done it, else whatever was
+// persisted from a previous session), or null if nothing's been resolved
+// yet at all — meaning nothing can possibly be cached yet either.
+function peekResolvedMonth(probeParams) {
+  const key = monthSignature(probeParams);
+  const inMemory = monthResolutionCache.get(key);
+  if (inMemory) return inMemory.month;
+  const persisted = loadResolvedMonth(key);
+  return persisted ? persisted.month : null;
 }
 
 function buildExplorerUrl(params) {
@@ -165,13 +191,26 @@ function computeNodeFromRaw(data, color, ply, settings) {
 
   if (isMyMove) {
     // Score every candidate by MY win rate from this position, draws = loss.
+    // Ties go to the move with more games (more real-world testing of that
+    // line); if it's still tied after that, pick uniformly at random among
+    // the tied candidates (reservoir sampling — each survives with
+    // probability 1/(number of ties seen so far), which works out uniform
+    // without needing to collect the whole tied group first).
     let best = null;
+    let tieCount = 0;
     for (const m of moves) {
       const n = (m.white || 0) + (m.draws || 0) + (m.black || 0);
       if (n < settings.minSampleSize) continue;
       const wins = color === 'white' ? (m.white || 0) : (m.black || 0);
       const score = wins / n;
-      if (!best || score > best.score) best = { uci: m.uci, san: m.san, games: n, score };
+      const candidate = { uci: m.uci, san: m.san, games: n, score };
+      if (!best || score > best.score || (score === best.score && n > best.games)) {
+        best = candidate;
+        tieCount = 1;
+      } else if (score === best.score && n === best.games) {
+        tieCount++;
+        if (Math.random() < 1 / tieCount) best = candidate;
+      }
     }
     return { games: totalGames, myMove: best, opponentMoves: null };
   }
@@ -203,6 +242,11 @@ function cacheKeyFor(queryParams, month, uciPath) {
   return `${month}::${queryParams.variant}::${queryParams.speeds}::${queryParams.ratings}::${uciPath.join(',')}`;
 }
 
+// Freshness is expressed in months (users think "refetch monthly", not
+// "refetch every 720 hours") and decimals are expected (e.g. 0.5 for twice a
+// month) — an average month length is precise enough for a staleness check.
+const MS_PER_MONTH = 30.44 * 24 * 60 * 60 * 1000;
+
 /**
  * Fetches (or serves from cache) one position and returns it as a
  * repertoire node: { games, myMove, opponentMoves }. Lazy — this is the
@@ -230,7 +274,7 @@ export async function getPosition(uciPath, color, settings, opts = {}) {
   const key = cacheKeyFor(queryParams, month, uciPath);
 
   const cached = await cache.getCached(key);
-  const maxAgeMs = (settings.repertoireMaxAgeHours || 24) * 3600 * 1000;
+  const maxAgeMs = (settings.repertoireMaxAgeMonths || 1) * MS_PER_MONTH;
   let raw, fetchedAt, cacheHit;
   if (cached && Date.now() - cached.fetchedAt < maxAgeMs) {
     raw = cached.data;
@@ -247,4 +291,32 @@ export async function getPosition(uciPath, color, settings, opts = {}) {
 
   const node = computeNodeFromRaw(raw, color, uciPath.length, settings);
   return { node, cacheHit, fetchedAt, cacheKey: key };
+}
+
+/**
+ * Browse's read-only counterpart to getPosition(): looks at whatever's
+ * already cached and never fetches, never resolves the month over the
+ * network, never writes anything. Returns { node: null, cached: false }
+ * when nothing's known yet for this position — the caller (Browse) is
+ * expected to show that as "not fetched yet" rather than treating it the
+ * same as a genuine end-of-theory leaf, which getPosition's node shape
+ * can't distinguish (null myMove/opponentMoves there just means "no data").
+ *
+ * @param {string[]} uciPath
+ * @param {'white'|'black'} color
+ * @param {object} settings
+ * @param {{cache?: {getCached, putCached}}} opts
+ */
+export async function peekPosition(uciPath, color, settings, opts = {}) {
+  const cache = opts.cache || { getCached, putCached };
+  const queryParams = explorerQueryParams(settings);
+  const month = peekResolvedMonth(queryParams);
+  if (!month) return { node: null, cached: false, fetchedAt: null };
+
+  const key = cacheKeyFor(queryParams, month, uciPath);
+  const cached = await cache.getCached(key);
+  if (!cached) return { node: null, cached: false, fetchedAt: null };
+
+  const node = computeNodeFromRaw(cached.data, color, uciPath.length, settings);
+  return { node, cached: true, fetchedAt: cached.fetchedAt };
 }
