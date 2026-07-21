@@ -54,7 +54,11 @@
 // [1, MAX_WINDOW_MONTHS]. This converges in a step or two for most
 // positions without needing to actually search within a single fetch,
 // which would mean an unbounded number of requests (and an unbounded quiz-
-// time wait) triggered by one lazy lookup.
+// time wait) triggered by one lazy lookup. A position that's still short of
+// target even at MAX_WINDOW_MONTHS escalates once more to FULL_HISTORY — a
+// single request with no since/until at all, covering everything Lichess
+// has indexed for it — since month-by-month clearly isn't going to get
+// there no matter how far back it goes.
 import { getCached, putCached, getWindowHint, putWindowHint } from './positionCache.js';
 import { loadResolvedMonth, saveResolvedMonth } from './storage.js';
 
@@ -279,12 +283,26 @@ function windowHintKeyFor(queryParams, uciPath) {
 }
 
 const DEFAULT_TARGET_GAMES = 1000;
-// Hard cap on how many months one position's window can grow to, regardless
-// of how far the games count remains under target — bounds the worst case
-// of a single lazy fetch (a live quiz waiting on this) to a fixed number of
-// sequential requests instead of searching indefinitely for an obscure
-// enough position that may never reach the target within Lichess's history.
+// Hard cap on how many months one position's window can grow to via the
+// month-by-month path, regardless of how far the games count remains under
+// target — bounds the worst case of a single lazy fetch (a live quiz
+// waiting on this) to a fixed number of sequential requests. Once a
+// position is stuck at this cap and still short of target, the window
+// escalates once more to FULL_HISTORY (see below) rather than growing
+// month-by-month forever.
 const MAX_WINDOW_MONTHS = 12;
+
+// A sentinel window "size" meaning "don't filter by date at all — ask for
+// this position's entire indexed history in one request." Reserved for
+// positions so obscure that even MAX_WINDOW_MONTHS of monthly requests
+// couldn't reach the target; there's nowhere further to grow from here, so
+// (unlike the numeric sizes) this never shrinks back down once reached.
+// Unlike the single-month-omitted case documented above (confirmed live to
+// return 0 games), this omits *both* since and until — untested against the
+// real API from this dev sandbox (network policy blocks lichess.org here),
+// but is what the explorer's own docs describe as the actual no-filter
+// default, and is a materially different request than the broken case.
+const FULL_HISTORY = 'full';
 
 // Proportionally scales the window toward whatever would have hit the
 // target last time, based on the games-per-month density actually observed
@@ -292,12 +310,18 @@ const MAX_WINDOW_MONTHS = 12;
 // positions rather than crawling one month at a time. No prior hint (a
 // position's very first-ever fetch) starts at the cheapest possible probe,
 // 1 month; a prior fetch that came back completely empty doubles the
-// window rather than dividing by zero.
+// window rather than dividing by zero. Once already at FULL_HISTORY, or
+// once the month-by-month window is maxed out and still short of target,
+// escalates to (or stays at) FULL_HISTORY instead of continuing to grow
+// (or re-probe) month by month.
 function nextWindowMonths(hint, targetGames) {
   if (!hint || !hint.windowMonths) return 1;
+  if (hint.windowMonths === FULL_HISTORY) return FULL_HISTORY;
+  const atCap = hint.windowMonths >= MAX_WINDOW_MONTHS;
   if (!hint.totalGames || hint.totalGames <= 0) {
-    return Math.min(MAX_WINDOW_MONTHS, Math.max(hint.windowMonths * 2, 2));
+    return atCap ? FULL_HISTORY : Math.min(MAX_WINDOW_MONTHS, Math.max(hint.windowMonths * 2, 2));
   }
+  if (hint.totalGames < targetGames && atCap) return FULL_HISTORY;
   const scaled = Math.round((hint.windowMonths * targetGames) / hint.totalGames);
   return Math.max(1, Math.min(MAX_WINDOW_MONTHS, scaled));
 }
@@ -366,15 +390,21 @@ export async function getPosition(uciPath, color, settings, opts = {}) {
     const hint = await cache.getWindowHint(hintKey);
     const windowMonths = nextWindowMonths(hint, targetGames);
 
-    // One request per month, sequentially rather than in parallel — gentler
-    // on Lichess's server for the (rare) obscure position whose window has
-    // grown large, in keeping with the whole lazy-fetch design's goal of
-    // minimizing server strain over raw speed.
-    const perMonth = [];
-    for (let i = 0; i < windowMonths; i++) {
-      const monthToFetch = monthString(-(monthsBack + i));
-      const url = buildExplorerUrl({ ...queryParams, since: monthToFetch, until: monthToFetch, play: uciPath.join(',') });
-      perMonth.push(await fetchExplorerRaw(url, { signal: opts.signal, token: settings.lichessToken }));
+    let perMonth;
+    if (windowMonths === FULL_HISTORY) {
+      const url = buildExplorerUrl({ ...queryParams, play: uciPath.join(',') }); // no since/until at all
+      perMonth = [await fetchExplorerRaw(url, { signal: opts.signal, token: settings.lichessToken })];
+    } else {
+      // One request per month, sequentially rather than in parallel —
+      // gentler on Lichess's server for the (rare) obscure position whose
+      // window has grown large, in keeping with the whole lazy-fetch
+      // design's goal of minimizing server strain over raw speed.
+      perMonth = [];
+      for (let i = 0; i < windowMonths; i++) {
+        const monthToFetch = monthString(-(monthsBack + i));
+        const url = buildExplorerUrl({ ...queryParams, since: monthToFetch, until: monthToFetch, play: uciPath.join(',') });
+        perMonth.push(await fetchExplorerRaw(url, { signal: opts.signal, token: settings.lichessToken }));
+      }
     }
     raw = mergeMovesData(perMonth);
     const totalGames = raw.moves.reduce((s, m) => s + (m.white || 0) + (m.draws || 0) + (m.black || 0), 0);

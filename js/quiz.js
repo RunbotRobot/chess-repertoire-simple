@@ -99,7 +99,14 @@ export class QuizSession {
       idx++;
     }
 
-    return { missed, attemptPath, pathId: attemptPath.map((p) => p.uci).join(' ') };
+    // node.games here is whatever position the loop stopped at: on a clean
+    // finish, that's a genuine leaf (computeNodeFromRaw only ever produces
+    // one because the position's game count fell under minSampleSize — see
+    // explorer.js), so it doubles as "how many games was that leaf actually
+    // based on." On a miss, it's the position where the wrong move was
+    // played, not meaningful the same way — callers should only read
+    // leafGames when !missed.
+    return { missed, attemptPath, pathId: attemptPath.map((p) => p.uci).join(' '), leafGames: node.games };
   }
 
   /**
@@ -140,7 +147,15 @@ handlers shape:
                                                         confirm / reveal the correct move. fen reflects the
                                                         position after the move when correct, or is unchanged
                                                         (pre-move) on a miss, so a board can be kept in sync.
-  onLineEnd({missed, attemptPath}) -> Promise<void>
+  onLineEnd({missed, attemptPath, leafGames}) -> Promise<void>
+                                                        fires once per line (fresh or replay). Both handlers are
+                                                        awaited before the session moves on, which is deliberate:
+                                                        it's how a caller pauses for explicit user
+                                                        acknowledgement — e.g. showing "only N games here, not
+                                                        enough to trust" (leafGames, when !missed) and waiting for
+                                                        a "continue" action before starting the next line, or
+                                                        onResult holding on a wrong-move correction — rather than
+                                                        the session barreling ahead on its own timer.
   onReplayStart(attemptPath) -> Promise<void>
   onReplayEnd({missed, attemptPath}) -> Promise<void>
 */

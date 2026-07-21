@@ -71,6 +71,12 @@ require a real origin).
   back-to-back one-shot passes that restart automatically — expect
   occasional half-second gaps rather than a perfectly seamless stream.
 
+## Credits
+
+Board piece art is the "cburnett" set (by Colin M.L. Burnett, CC BY-SA 3.0 —
+also lichess.org's default set), embedded as inline SVG path data in
+`js/board.js` rather than loaded as image assets.
+
 ## Testing notes
 
 This was built and tested in a sandboxed dev environment whose egress policy

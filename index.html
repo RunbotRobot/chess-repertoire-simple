@@ -96,6 +96,8 @@
     font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;color:#9aa4b8;
     max-height:220px;overflow-y:auto;white-space:pre-wrap;}
   .voice-support-warn{font-size:12px;color:var(--warn);margin-top:6px;}
+  .replay-badge{display:inline-block;font-size:11px;font-weight:600;text-transform:none;letter-spacing:normal;
+    background:var(--warn);color:#2a1f00;border-radius:999px;padding:3px 10px;margin-left:8px;vertical-align:middle;}
 </style>
 </head>
 <body>
@@ -240,6 +242,7 @@
         </div>
         <div id="board-wrap"></div>
         <div class="breadcrumb" id="browse-breadcrumb"></div>
+        <div class="hint" id="browse-feedback" style="min-height:1.2em;"></div>
         <div class="movelist" id="browse-movelist"></div>
       </div>
     </section>
@@ -267,9 +270,12 @@
       </div>
 
       <div class="card" id="manual-quiz-panel" style="display:none;">
-        <h3>Quiz</h3>
+        <h3>Quiz <span id="manual-replay-badge" class="replay-badge" style="display:none;">↻ Replay (memorization)</span></h3>
         <div id="manual-board-wrap" style="max-width:320px;margin:0 auto 10px;"></div>
         <div class="hint" id="manual-status">—</div>
+        <div class="btn-row" style="margin-top:10px;">
+          <button class="btn btn-block" id="manual-continue-btn" style="display:none;">Continue</button>
+        </div>
 
         <div id="manual-analysis-panel" style="display:none;margin-top:10px;padding-top:10px;border-top:1px solid var(--line);">
           <div class="row">
