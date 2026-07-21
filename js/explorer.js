@@ -180,6 +180,22 @@ export async function buildRepertoire(color, settings, opts = {}) {
         topLevel: { white: data.white, draws: data.draws, black: data.black },
         url: url.toString(),
       };
+
+      if (totalGames === 0) {
+        // Controlled experiment: the exact same query minus since/until.
+        // If that comes back with real games, since/until specifically are
+        // the problem; if it's ALSO empty, something else in the query is —
+        // either way, this settles it without another manual round trip.
+        try {
+          const probeUrl = buildExplorerUrl({ ...baseParams, since: undefined, until: undefined });
+          const probeData = await limiter.run(() => fetchExplorerRaw(probeUrl, { signal: opts.signal, token: settings.lichessToken }));
+          const probeMoves = Array.isArray(probeData.moves) ? probeData.moves : [];
+          const probeTotalGames = probeMoves.reduce((s, m) => s + (m.white || 0) + (m.draws || 0) + (m.black || 0), 0);
+          rootDiagnostic.probeWithoutDateRange = { totalGames: probeTotalGames, movesReturned: probeMoves.length, url: probeUrl.toString() };
+        } catch (err) {
+          rootDiagnostic.probeWithoutDateRange = { error: String(err.message || err) };
+        }
+      }
     }
 
     if (totalGames < settings.minSampleSize || moves.length === 0) {
