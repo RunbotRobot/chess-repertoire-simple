@@ -13,7 +13,7 @@ import { Chess } from './vendor/chess.esm.js';
 // devtools is actually running the latest code, and it also drives the
 // service worker's cache name (see sw.js) so updates actually take effect
 // instead of being served stale from the offline cache.
-export const APP_VERSION = 18;
+export const APP_VERSION = 19;
 
 const COLOR_OPTIONS = ['white', 'black'];
 const RATING_OPTIONS = ['1000', '1200', '1400', '1600', '1800', '2000', '2200', '2500'];
@@ -108,7 +108,7 @@ function fillSettingsForm() {
   $('#minSampleSize').value = settings.minSampleSize;
   $('#opponentBranchMinShare').value = Math.round(settings.opponentBranchMinShare * 100);
   $('#opponentBranchMinGames').value = settings.opponentBranchMinGames;
-  $('#maxPlies').value = settings.maxPlies;
+  $('#maxPlies').value = Number.isFinite(settings.maxPlies) ? settings.maxPlies : '';
   $('#alwaysReplayOnSuccess').checked = settings.alwaysReplayOnSuccess;
   $('#dimScreenDuringQuiz').checked = settings.dimScreenDuringQuiz;
   $('#showDebugLog').checked = readDebugPref();
@@ -145,7 +145,10 @@ function readSettingsForm() {
     minSampleSize: Number($('#minSampleSize').value) || DEFAULT_SETTINGS.minSampleSize,
     opponentBranchMinShare: (Number($('#opponentBranchMinShare').value) || 0) / 100,
     opponentBranchMinGames: Number($('#opponentBranchMinGames').value) || 0,
-    maxPlies: Number($('#maxPlies').value) || DEFAULT_SETTINGS.maxPlies,
+    // Blank genuinely means "no ply cap" here, not "use the default" — the
+    // separate hard maxNodes cap (see explorer.js) is what actually bounds
+    // memory/network use, so there's no need to force a depth limit too.
+    maxPlies: $('#maxPlies').value.trim() === '' ? Infinity : Number($('#maxPlies').value),
     alwaysReplayOnSuccess: $('#alwaysReplayOnSuccess').checked,
     dimScreenDuringQuiz: $('#dimScreenDuringQuiz').checked,
     voiceURI: $('#voiceSelect').value || null,

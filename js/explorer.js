@@ -8,25 +8,23 @@
 //
 // Data-source caveat: the repertoire is scoped to the last fully-completed
 // calendar month plus whatever's available of the current one, switching
-// over on the 1st — see monthWindow(). Getting there took a few rounds of
-// live debugging (see git history), landing on the actual cause: `since`
-// as a bare YYYY-MM (documented format, and what the old lichess.ovh
-// explorer wanted) silently breaks the query — confirmed live: `since`
-// alone returned 0 games, `until` alone returned the exact same count as
-// no filter at all, and dropping both returned real data. That's the
-// signature of a date parse failure defaulting to "exclude everything"
-// for a lower bound and "no effective ceiling" for an upper one. Full
-// `YYYY-MM-DD` dates — matching the format lichess.org's own game search
-// UI uses — fixed it. `until` is set to tomorrow rather than today, as a
-// defensive buffer in case it turns out to be an exclusive bound.
+// over on the 1st — see monthWindow(). This has been a genuinely hard bug
+// to pin down live (see git history for the full trail). Round one: bare
+// `since`/`until` as YYYY-MM (the documented format) returned 0 games with
+// `since` set, so a full YYYY-MM-DD date was tried instead — but the
+// server rejected that outright: "Failed to deserialize query string:
+// invalid month". So YYYY-MM was right all along, and the actual cause is
+// still open — back to YYYY-MM here, with sharper probes (see expand())
+// to actually pin it down instead of guessing a third time.
 const EXPLORER_URL = 'https://explorer.lichess.org/lichess';
 
+function monthString(monthOffset, from = new Date()) {
+  const d = new Date(Date.UTC(from.getUTCFullYear(), from.getUTCMonth() + monthOffset, 1));
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
+}
+
 export function monthWindow() {
-  const now = new Date();
-  const prevMonthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1));
-  const tomorrow = new Date(now.getTime() + 24 * 60 * 60 * 1000);
-  const fmt = (d) => `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
-  return { since: fmt(prevMonthStart), until: fmt(tomorrow) };
+  return { since: monthString(-1), until: monthString(0) };
 }
 
 class RateLimiter {
@@ -127,6 +125,10 @@ async function fetchExplorerRaw(url, { signal, token } = {}) {
 export async function buildRepertoire(color, settings, opts = {}) {
   const { since, until } = monthWindow();
   const limiter = new RateLimiter(4, 60);
+  // "No depth limit" round-trips through JSON as null (Infinity isn't
+  // JSON-safe), and `ply >= null` coerces null to 0 — silently terminating
+  // the tree at the root instead of never terminating. Normalize once here.
+  const maxPlies = Number.isFinite(settings.maxPlies) ? settings.maxPlies : Infinity;
   let nodesFetched = 0;
   let nodesCapped = false;
   let nodesFailed = 0;
@@ -158,7 +160,7 @@ export async function buildRepertoire(color, settings, opts = {}) {
   async function expand(node, uciPath) {
     if (opts.signal?.aborted) return;
     if (nodesFetched >= maxNodes) { nodesCapped = true; return; }
-    if (node.ply >= settings.maxPlies) return;
+    if (node.ply >= maxPlies) return;
 
     let data, url;
     try {
@@ -191,14 +193,20 @@ export async function buildRepertoire(color, settings, opts = {}) {
       };
 
       if (totalGames === 0) {
-        // Controlled experiment: the same query with since/until dropped in
-        // every combination that isolates which one (or their combination)
-        // is actually responsible, in one round trip instead of guessing
-        // through several.
+        // Round 1 (since/until dropped in every combination) already showed
+        // `since` alone breaks it while `until` alone doesn't. Round 2 (full
+        // YYYY-MM-DD dates) got an explicit "invalid month" rejection, which
+        // rules out the date *format* — YYYY-MM is confirmed correct. Round
+        // 3 probes what's left: whether combining a date range with a
+        // *rating* filter specifically is what's unsupported, and whether
+        // `since` fails only for already-completed past months (vs. also
+        // failing for the current one).
+        const twoMonthsAgo = monthString(-2);
         const probeVariants = [
           { label: 'no since, no until', overrides: { since: undefined, until: undefined } },
-          { label: 'since only, no until', overrides: { until: undefined } },
-          { label: 'until only, no since', overrides: { since: undefined } },
+          { label: 'since+until, no ratings filter', overrides: { ratings: undefined } },
+          { label: 'since=until=a fully-completed past month', overrides: { since: twoMonthsAgo, until: twoMonthsAgo } },
+          { label: 'since = current month (not past), no until', overrides: { since: monthString(0), until: undefined } },
         ];
         rootDiagnostic.probes = [];
         for (const variant of probeVariants) {
