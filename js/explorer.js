@@ -182,18 +182,26 @@ export async function buildRepertoire(color, settings, opts = {}) {
       };
 
       if (totalGames === 0) {
-        // Controlled experiment: the exact same query minus since/until.
-        // If that comes back with real games, since/until specifically are
-        // the problem; if it's ALSO empty, something else in the query is —
-        // either way, this settles it without another manual round trip.
-        try {
-          const probeUrl = buildExplorerUrl({ ...baseParams, since: undefined, until: undefined });
-          const probeData = await limiter.run(() => fetchExplorerRaw(probeUrl, { signal: opts.signal, token: settings.lichessToken }));
-          const probeMoves = Array.isArray(probeData.moves) ? probeData.moves : [];
-          const probeTotalGames = probeMoves.reduce((s, m) => s + (m.white || 0) + (m.draws || 0) + (m.black || 0), 0);
-          rootDiagnostic.probeWithoutDateRange = { totalGames: probeTotalGames, movesReturned: probeMoves.length, url: probeUrl.toString() };
-        } catch (err) {
-          rootDiagnostic.probeWithoutDateRange = { error: String(err.message || err) };
+        // Controlled experiment: the same query with since/until dropped in
+        // every combination that isolates which one (or their combination)
+        // is actually responsible, in one round trip instead of guessing
+        // through several.
+        const probeVariants = [
+          { label: 'no since, no until', overrides: { since: undefined, until: undefined } },
+          { label: 'since only, no until', overrides: { until: undefined } },
+          { label: 'until only, no since', overrides: { since: undefined } },
+        ];
+        rootDiagnostic.probes = [];
+        for (const variant of probeVariants) {
+          try {
+            const probeUrl = buildExplorerUrl({ ...baseParams, ...variant.overrides });
+            const probeData = await limiter.run(() => fetchExplorerRaw(probeUrl, { signal: opts.signal, token: settings.lichessToken }));
+            const probeMoves = Array.isArray(probeData.moves) ? probeData.moves : [];
+            const probeTotalGames = probeMoves.reduce((s, m) => s + (m.white || 0) + (m.draws || 0) + (m.black || 0), 0);
+            rootDiagnostic.probes.push({ label: variant.label, totalGames: probeTotalGames, movesReturned: probeMoves.length, url: probeUrl.toString() });
+          } catch (err) {
+            rootDiagnostic.probes.push({ label: variant.label, error: String(err.message || err) });
+          }
         }
       }
     }

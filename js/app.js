@@ -13,7 +13,7 @@ import { Chess } from './vendor/chess.esm.js';
 // devtools is actually running the latest code, and it also drives the
 // service worker's cache name (see sw.js) so updates actually take effect
 // instead of being served stale from the offline cache.
-export const APP_VERSION = 15;
+export const APP_VERSION = 16;
 
 const COLOR_OPTIONS = ['white', 'black'];
 const RATING_OPTIONS = ['1000', '1200', '1400', '1600', '1800', '2000', '2200', '2500'];
@@ -252,9 +252,8 @@ $('#build-both').addEventListener('click', async () => {
         if (!rep.root.myMove && !rep.root.opponentMoves && rep.rootDiagnostic) {
           const d = rep.rootDiagnostic;
           log(`  ${color} root came back empty — totalGames=${d.totalGames}, movesReturned=${d.movesReturned}, topLevel=${JSON.stringify(d.topLevel)}, url=${d.url}`);
-          if (d.probeWithoutDateRange) {
-            const p = d.probeWithoutDateRange;
-            log(`  probe (same query, no since/until): ${p.error ? `error: ${p.error}` : `totalGames=${p.totalGames}, movesReturned=${p.movesReturned}`}, url=${p.url || '(n/a)'}`);
+          for (const p of d.probes || []) {
+            log(`  probe (${p.label}): ${p.error ? `error: ${p.error}` : `totalGames=${p.totalGames}, movesReturned=${p.movesReturned}`}, url=${p.url || '(n/a)'}`);
           }
         }
       } catch (err) {
