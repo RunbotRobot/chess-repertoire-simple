@@ -14,7 +14,7 @@ import { Chess } from './vendor/chess.esm.js';
 // devtools is actually running the latest code, and it also drives the
 // service worker's cache name (see sw.js) so updates actually take effect
 // instead of being served stale from the offline cache.
-export const APP_VERSION = 24;
+export const APP_VERSION = 25;
 
 const COLOR_OPTIONS = ['white', 'black'];
 const RATING_OPTIONS = ['1000', '1200', '1400', '1600', '1800', '2000', '2200', '2500'];
@@ -111,6 +111,7 @@ function fillSettingsForm() {
   $('#opponentBranchMinGames').value = settings.opponentBranchMinGames;
   $('#maxPlies').value = Number.isFinite(settings.maxPlies) ? settings.maxPlies : '';
   $('#repertoireMaxAgeMonths').value = settings.repertoireMaxAgeMonths;
+  $('#targetGamesPerPosition').value = settings.targetGamesPerPosition;
   $('#alwaysReplayOnSuccess').checked = settings.alwaysReplayOnSuccess;
   $('#dimScreenDuringQuiz').checked = settings.dimScreenDuringQuiz;
   $('#showDebugLog').checked = readDebugPref();
@@ -150,6 +151,7 @@ function readSettingsForm() {
     // Blank genuinely means "no ply cap" here, not "use the default".
     maxPlies: $('#maxPlies').value.trim() === '' ? Infinity : Number($('#maxPlies').value),
     repertoireMaxAgeMonths: Number($('#repertoireMaxAgeMonths').value) || DEFAULT_SETTINGS.repertoireMaxAgeMonths,
+    targetGamesPerPosition: Number($('#targetGamesPerPosition').value) || DEFAULT_SETTINGS.targetGamesPerPosition,
     alwaysReplayOnSuccess: $('#alwaysReplayOnSuccess').checked,
     dimScreenDuringQuiz: $('#dimScreenDuringQuiz').checked,
     voiceURI: $('#voiceSelect').value || null,
@@ -247,6 +249,21 @@ async function renderBrowse() {
     btn.innerHTML = `<span>My move: ${node.myMove.san}</span><span class="pct">${node.myMove.games} games, ${(node.myMove.score * 100).toFixed(0)}% score</span>`;
     btn.addEventListener('click', () => { browsePath = [...browsePath, node.myMove]; renderBrowse(); });
     movelist.appendChild(btn);
+
+    if (node.alternates && node.alternates.length > 0) {
+      const label = document.createElement('div');
+      label.className = 'hint';
+      label.style.marginTop = '8px';
+      label.textContent = 'Other candidates (not the repertoire pick, shown for reference):';
+      movelist.appendChild(label);
+      for (const alt of node.alternates) {
+        const altBtn = document.createElement('button');
+        altBtn.className = 'movebtn alt';
+        altBtn.innerHTML = `<span>${alt.san}</span><span class="pct">${alt.games} games, ${(alt.score * 100).toFixed(0)}% score</span>`;
+        altBtn.addEventListener('click', () => { browsePath = [...browsePath, alt]; renderBrowse(); });
+        movelist.appendChild(altBtn);
+      }
+    }
   } else if (node.opponentMoves) {
     for (const m of node.opponentMoves) {
       const btn = document.createElement('button');
@@ -266,6 +283,13 @@ const quizColorRadios = $$('input[name=quiz-color]');
 const quizInputRadios = $$('input[name=quiz-input]');
 const quizLive = $('#quiz-live');
 const quizModeLabel = $('#quiz-mode-label');
+
+// Default the Quiz tab's options to whatever was picked last time a quiz
+// was actually started, rather than always resetting to White/Voice.
+const savedColorRadio = quizColorRadios.find((r) => r.value === settings.lastQuizColor);
+if (savedColorRadio) quizColorRadios.forEach((r) => { r.checked = r === savedColorRadio; });
+const savedInputRadio = quizInputRadios.find((r) => r.value === settings.lastQuizInputMethod);
+if (savedInputRadio) quizInputRadios.forEach((r) => { r.checked = r === savedInputRadio; });
 
 function updateQuizInputHint() {
   const val = quizInputRadios.find((r) => r.checked).value;
@@ -386,6 +410,9 @@ $('#start-quiz').addEventListener('click', async () => {
     $('#quiz-mic-warn').textContent = 'No Lichess API token set — add one in Setup first.';
     return;
   }
+
+  settings = { ...settings, lastQuizColor: quizMode, lastQuizInputMethod: inputMethod };
+  saveSettings(settings);
 
   if (inputMethod === 'manual') {
     $('#quiz-mic-warn').textContent = '';
@@ -581,16 +608,27 @@ async function startManualQuiz(quizMode) {
       });
     },
     onResult: async ({ correct, correctSan, correctUci, fen }) => {
-      manualCurrentFen = fen;
       manualLegalMoves = [];
       manualSelectedSquare = null;
+      const lastMove = { from: correctUci.slice(0, 2), to: correctUci.slice(2, 4) };
       if (correct) {
-        renderManualBoard(fen, { from: correctUci.slice(0, 2), to: correctUci.slice(2, 4) });
+        manualCurrentFen = fen;
+        renderManualBoard(fen, lastMove);
         $('#manual-status').textContent = `Correct — ${correctSan}.`;
-      } else {
-        renderManualBoard(fen); // turns off interactivity now that manualPendingResolve is cleared; lastMove unchanged
-        $('#manual-status').textContent = `Not quite. The move was ${correctSan}.`;
+        return;
       }
+      // fen here is the pre-move position (quiz.js's contract on a miss).
+      // Play the correct move out on the board so the correction is
+      // concrete, not just named in text, and hold on it long enough to
+      // actually read it — the forced replay that follows immediately after
+      // would otherwise yank the board back to the start before anyone
+      // could see this.
+      const corrected = new Chess(fen);
+      corrected.move({ from: lastMove.from, to: lastMove.to, promotion: correctUci.length > 4 ? correctUci[4] : undefined });
+      manualCurrentFen = corrected.fen();
+      renderManualBoard(manualCurrentFen, lastMove);
+      $('#manual-status').textContent = `Not quite — the move was ${correctSan}.`;
+      await new Promise((r) => setTimeout(r, 2000));
     },
     onLineEnd: async ({ missed }) => {
       if (missed) return;

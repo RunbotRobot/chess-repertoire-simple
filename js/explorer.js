@@ -35,7 +35,27 @@
 // the last-resolved month persisted in localStorage (see
 // storage.js's loadResolvedMonth) rather than re-resolving it itself, so
 // opening the Browse tab never makes a request of its own.
-import { getCached, putCached } from './positionCache.js';
+//
+// Adaptive history window: a single calendar month of games is plenty of
+// sample size for a heavily-played position, but nowhere near enough for an
+// obscure one — and conversely, a well-known position's single month is
+// already *more* than enough, so padding it with a year of history would
+// just be diluting "current knowledge" with stale games. Since a single
+// query can only ever cover one calendar month (see above), a wider window
+// is built by querying multiple consecutive months separately and summing
+// them — there's no other way to ask Lichess for more than one month at a
+// time. How many months to pull is decided adaptively per position: after
+// each real fetch, the resulting {windowMonths, totalGames} is saved (via
+// positionCache.js's windowHints store, keyed without the month so it
+// survives month rollovers) and used to compute a new window size next time
+// — scaled proportionally toward whatever would have hit
+// targetGamesPerPosition (e.g. if 3 months yielded 300 games against a
+// 1000 target, next time try roughly 3 * 1000/300 = 10 months), clamped to
+// [1, MAX_WINDOW_MONTHS]. This converges in a step or two for most
+// positions without needing to actually search within a single fetch,
+// which would mean an unbounded number of requests (and an unbounded quiz-
+// time wait) triggered by one lazy lookup.
+import { getCached, putCached, getWindowHint, putWindowHint } from './positionCache.js';
 import { loadResolvedMonth, saveResolvedMonth } from './storage.js';
 
 const EXPLORER_URL = 'https://explorer.lichess.org/lichess';
@@ -196,23 +216,31 @@ function computeNodeFromRaw(data, color, ply, settings) {
     // the tied candidates (reservoir sampling — each survives with
     // probability 1/(number of ties seen so far), which works out uniform
     // without needing to collect the whole tied group first).
-    let best = null;
-    let tieCount = 0;
+    const candidates = [];
     for (const m of moves) {
       const n = (m.white || 0) + (m.draws || 0) + (m.black || 0);
       if (n < settings.minSampleSize) continue;
       const wins = color === 'white' ? (m.white || 0) : (m.black || 0);
-      const score = wins / n;
-      const candidate = { uci: m.uci, san: m.san, games: n, score };
-      if (!best || score > best.score || (score === best.score && n > best.games)) {
+      candidates.push({ uci: m.uci, san: m.san, games: n, score: wins / n });
+    }
+    candidates.sort((a, b) => b.score - a.score || b.games - a.games);
+
+    let best = null;
+    let tieCount = 0;
+    for (const candidate of candidates) {
+      if (!best || candidate.score > best.score || (candidate.score === best.score && candidate.games > best.games)) {
         best = candidate;
         tieCount = 1;
-      } else if (score === best.score && n === best.games) {
+      } else if (candidate.score === best.score && candidate.games === best.games) {
         tieCount++;
         if (Math.random() < 1 / tieCount) best = candidate;
       }
     }
-    return { games: totalGames, myMove: best, opponentMoves: null };
+    // The other candidates aren't part of the repertoire (only one move is
+    // ever quizzed per position), but Browse shows them for reference —
+    // sorted the same way, highest-scoring first.
+    const alternates = candidates.filter((c) => c !== best);
+    return { games: totalGames, myMove: best, alternates, opponentMoves: null };
   }
 
   // Keep every reply that's genuinely common; I need to be ready for it.
@@ -242,6 +270,56 @@ function cacheKeyFor(queryParams, month, uciPath) {
   return `${month}::${queryParams.variant}::${queryParams.speeds}::${queryParams.ratings}::${uciPath.join(',')}`;
 }
 
+// Unlike cacheKeyFor, deliberately excludes the month — this key tracks
+// "how big a window did this position need," which should persist across
+// month rollovers rather than resetting every time the queryable month
+// (and therefore the main cache key) advances.
+function windowHintKeyFor(queryParams, uciPath) {
+  return `${queryParams.variant}::${queryParams.speeds}::${queryParams.ratings}::${uciPath.join(',')}`;
+}
+
+const DEFAULT_TARGET_GAMES = 1000;
+// Hard cap on how many months one position's window can grow to, regardless
+// of how far the games count remains under target — bounds the worst case
+// of a single lazy fetch (a live quiz waiting on this) to a fixed number of
+// sequential requests instead of searching indefinitely for an obscure
+// enough position that may never reach the target within Lichess's history.
+const MAX_WINDOW_MONTHS = 12;
+
+// Proportionally scales the window toward whatever would have hit the
+// target last time, based on the games-per-month density actually observed
+// (totalGames / windowMonths) — a single step gets close for most
+// positions rather than crawling one month at a time. No prior hint (a
+// position's very first-ever fetch) starts at the cheapest possible probe,
+// 1 month; a prior fetch that came back completely empty doubles the
+// window rather than dividing by zero.
+function nextWindowMonths(hint, targetGames) {
+  if (!hint || !hint.windowMonths) return 1;
+  if (!hint.totalGames || hint.totalGames <= 0) {
+    return Math.min(MAX_WINDOW_MONTHS, Math.max(hint.windowMonths * 2, 2));
+  }
+  const scaled = Math.round((hint.windowMonths * targetGames) / hint.totalGames);
+  return Math.max(1, Math.min(MAX_WINDOW_MONTHS, scaled));
+}
+
+// Combines several months' raw explorer responses into one, summing game
+// counts per move (uci) across all of them. A move missing from some
+// months (e.g. it wasn't played that month) just contributes 0 for those.
+function mergeMovesData(perMonthResponses) {
+  const byUci = new Map();
+  for (const data of perMonthResponses) {
+    const moves = Array.isArray(data.moves) ? data.moves : [];
+    for (const m of moves) {
+      const existing = byUci.get(m.uci) || { uci: m.uci, san: m.san, white: 0, draws: 0, black: 0 };
+      existing.white += m.white || 0;
+      existing.draws += m.draws || 0;
+      existing.black += m.black || 0;
+      byUci.set(m.uci, existing);
+    }
+  }
+  return { moves: [...byUci.values()] };
+}
+
 // Freshness is expressed in months (users think "refetch monthly", not
 // "refetch every 720 hours") and decimals are expected (e.g. 0.5 for twice a
 // month) — an average month length is precise enough for a staleness check.
@@ -249,28 +327,29 @@ const MS_PER_MONTH = 30.44 * 24 * 60 * 60 * 1000;
 
 /**
  * Fetches (or serves from cache) one position and returns it as a
- * repertoire node: { games, myMove, opponentMoves }. Lazy — this is the
- * only place a network request for opening data happens; quiz/browse call
- * it exactly when they navigate to a position, not ahead of time.
+ * repertoire node: { games, myMove, alternates, opponentMoves }. Lazy —
+ * this is the only place a network request for opening data happens;
+ * quiz/browse call it exactly when they navigate to a position, not ahead
+ * of time.
  *
  * @param {string[]} uciPath moves from the start position, in UCI form
  * @param {'white'|'black'} color which repertoire this is for
  * @param {object} settings
- * @param {{signal?: AbortSignal, onBeforeFetch?: () => void, cache?: {getCached, putCached}}} opts
+ * @param {{signal?: AbortSignal, onBeforeFetch?: () => void, cache?: {getCached, putCached, getWindowHint, putWindowHint}}} opts
  *   onBeforeFetch fires synchronously, only when a real network request is
  *   about to happen (not on a cache hit) — the hook for "hold on, fetching…"
  *   UX. cache defaults to the real IndexedDB-backed one; tests inject a
  *   fake in-memory implementation instead.
  */
 export async function getPosition(uciPath, color, settings, opts = {}) {
-  const cache = opts.cache || { getCached, putCached };
+  const cache = opts.cache || { getCached, putCached, getWindowHint, putWindowHint };
   const maxPlies = Number.isFinite(settings.maxPlies) ? settings.maxPlies : Infinity;
   if (uciPath.length >= maxPlies) {
     return { node: { games: 0, myMove: null, opponentMoves: null }, cacheHit: true, fetchedAt: null, cacheKey: null };
   }
 
   const queryParams = explorerQueryParams(settings);
-  const { month } = await resolveMonthCached(queryParams, settings.lichessToken, opts);
+  const { month, monthsBack } = await resolveMonthCached(queryParams, settings.lichessToken, opts);
   const key = cacheKeyFor(queryParams, month, uciPath);
 
   const cached = await cache.getCached(key);
@@ -282,9 +361,26 @@ export async function getPosition(uciPath, color, settings, opts = {}) {
     cacheHit = true;
   } else {
     opts.onBeforeFetch?.();
-    const url = buildExplorerUrl({ ...queryParams, since: month, until: month, play: uciPath.join(',') });
-    raw = await fetchExplorerRaw(url, { signal: opts.signal, token: settings.lichessToken });
+    const targetGames = settings.targetGamesPerPosition || DEFAULT_TARGET_GAMES;
+    const hintKey = windowHintKeyFor(queryParams, uciPath);
+    const hint = await cache.getWindowHint(hintKey);
+    const windowMonths = nextWindowMonths(hint, targetGames);
+
+    // One request per month, sequentially rather than in parallel — gentler
+    // on Lichess's server for the (rare) obscure position whose window has
+    // grown large, in keeping with the whole lazy-fetch design's goal of
+    // minimizing server strain over raw speed.
+    const perMonth = [];
+    for (let i = 0; i < windowMonths; i++) {
+      const monthToFetch = monthString(-(monthsBack + i));
+      const url = buildExplorerUrl({ ...queryParams, since: monthToFetch, until: monthToFetch, play: uciPath.join(',') });
+      perMonth.push(await fetchExplorerRaw(url, { signal: opts.signal, token: settings.lichessToken }));
+    }
+    raw = mergeMovesData(perMonth);
+    const totalGames = raw.moves.reduce((s, m) => s + (m.white || 0) + (m.draws || 0) + (m.black || 0), 0);
+
     await cache.putCached(key, raw);
+    await cache.putWindowHint(hintKey, { windowMonths, totalGames });
     fetchedAt = Date.now();
     cacheHit = false;
   }

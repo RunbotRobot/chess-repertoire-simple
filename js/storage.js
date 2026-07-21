@@ -36,6 +36,9 @@ export const DEFAULT_SETTINGS = {
   voiceURI: null,        // chosen SpeechSynthesis voice, if any
   speechRate: 0.95,
   lichessToken: '',      // required as of the explorer API's OAuth requirement; see Setup
+  targetGamesPerPosition: 1000, // see explorer.js's adaptive-window comment
+  lastQuizColor: 'white',        // Quiz tab remembers your last picks and defaults to them next time
+  lastQuizInputMethod: 'voice',
 };
 
 export function loadSettings() {
