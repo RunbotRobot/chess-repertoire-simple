@@ -14,7 +14,7 @@ import { Chess } from './vendor/chess.esm.js';
 // devtools is actually running the latest code, and it also drives the
 // service worker's cache name (see sw.js) so updates actually take effect
 // instead of being served stale from the offline cache.
-export const APP_VERSION = 28;
+export const APP_VERSION = 29;
 
 const COLOR_OPTIONS = ['white', 'black'];
 const RATING_OPTIONS = ['1000', '1200', '1400', '1600', '1800', '2000', '2200', '2500'];
@@ -605,6 +605,8 @@ async function startVoiceQuiz(quizMode) {
       inReplay = false;
       quizModeLabel.textContent = 'Quiz';
       log('Replay complete.');
+      await speakGuarded('Replay complete. Say ready when you want the next line.');
+      await waitForVoiceContinue();
     },
   };
 
@@ -793,6 +795,8 @@ async function startManualQuiz(quizMode) {
     },
     onReplayEnd: async () => {
       $('#manual-replay-badge').style.display = 'none';
+      $('#manual-status').textContent = 'Replay complete. Tap Continue when ready for the next line.';
+      await waitForManualContinue();
     },
   };
 
