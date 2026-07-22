@@ -99,14 +99,21 @@ export class QuizSession {
       idx++;
     }
 
-    // node.games here is whatever position the loop stopped at: on a clean
-    // finish, that's a genuine leaf (computeNodeFromRaw only ever produces
-    // one because the position's game count fell under minSampleSize — see
-    // explorer.js), so it doubles as "how many games was that leaf actually
-    // based on." On a miss, it's the position where the wrong move was
-    // played, not meaningful the same way — callers should only read
-    // leafGames when !missed.
-    return { missed, attemptPath, pathId: attemptPath.map((p) => p.uci).join(' '), leafGames: node.games };
+    // node.games/node.windowInfo here describe whatever position the loop
+    // stopped at: on a clean finish, that's a genuine leaf (computeNodeFromRaw
+    // only ever produces one because the position's game count fell under
+    // minSampleSize — see explorer.js), so leafGames doubles as "how many
+    // games was that leaf actually based on," and leafWindowInfo as "how
+    // much history that came from, and what the next fetch would try." On a
+    // miss, it's the position where the wrong move was played, not
+    // meaningful the same way — callers should only read these when !missed.
+    return {
+      missed,
+      attemptPath,
+      pathId: attemptPath.map((p) => p.uci).join(' '),
+      leafGames: node.games,
+      leafWindowInfo: node.windowInfo,
+    };
   }
 
   /**
@@ -147,9 +154,13 @@ handlers shape:
                                                         confirm / reveal the correct move. fen reflects the
                                                         position after the move when correct, or is unchanged
                                                         (pre-move) on a miss, so a board can be kept in sync.
-  onLineEnd({missed, attemptPath, leafGames}) -> Promise<void>
-                                                        fires once per line (fresh or replay). Both handlers are
-                                                        awaited before the session moves on, which is deliberate:
+  onLineEnd({missed, attemptPath, leafGames, leafWindowInfo}) -> Promise<void>
+                                                        fires once per line (fresh or replay). leafWindowInfo
+                                                        ({windowMonths, totalGames, nextWindowMonths} — see
+                                                        explorer.js's getPosition) is debug/UI info about the
+                                                        leaf's data, meaningful only when !missed, same as
+                                                        leafGames. Both handlers are awaited before the session
+                                                        moves on, which is deliberate:
                                                         it's how a caller pauses for explicit user
                                                         acknowledgement — e.g. showing "only N games here, not
                                                         enough to trust" (leafGames, when !missed) and waiting for

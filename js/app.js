@@ -14,7 +14,7 @@ import { Chess } from './vendor/chess.esm.js';
 // devtools is actually running the latest code, and it also drives the
 // service worker's cache name (see sw.js) so updates actually take effect
 // instead of being served stale from the offline cache.
-export const APP_VERSION = 27;
+export const APP_VERSION = 28;
 
 const COLOR_OPTIONS = ['white', 'black'];
 const RATING_OPTIONS = ['1000', '1200', '1400', '1600', '1800', '2000', '2200', '2500'];
@@ -178,6 +178,21 @@ function cap(s) { return s[0].toUpperCase() + s.slice(1); }
 function leafGamesMessage(leafGames, minSampleSize) {
   if (!leafGames) return "No games recorded at this position — you've reached the edge of known theory.";
   return `Only ${leafGames} game${leafGames === 1 ? '' : 's'} here — not enough to trust (need ${minSampleSize}+).`;
+}
+
+function formatWindowSize(months) {
+  if (months == null) return 'unknown';
+  return months === 'full' ? 'full history' : `${months} month${months === 1 ? '' : 's'}`;
+}
+
+// Testing/debugging detail about the adaptive history window (see
+// explorer.js's header comment) behind a leaf: how much history this
+// position's data actually came from, and what the next fetch would try —
+// separate from leafGamesMessage since it's not something worth reading
+// aloud in voice mode, only logging.
+function windowInfoDebugText(windowInfo) {
+  if (!windowInfo) return null;
+  return `window: fetched ${formatWindowSize(windowInfo.windowMonths)} (${windowInfo.totalGames} games); next fetch will try ${formatWindowSize(windowInfo.nextWindowMonths)}.`;
 }
 
 // ---------- position cache status ----------
@@ -571,8 +586,13 @@ async function startVoiceQuiz(quizMode) {
       await speakGuarded(`Not quite. The move was ${sanSpoken(correctSan)}. Say ready when you want to continue.`);
       await waitForVoiceContinue();
     },
-    onLineEnd: async ({ missed, leafGames }) => {
+    onLineEnd: async ({ missed, leafGames, leafWindowInfo }) => {
       if (missed) return;
+      // The window/next-fetch detail is logged (visible in the debug log
+      // panel) rather than spoken — useful for troubleshooting without
+      // making the spoken message wordy.
+      const debugText = windowInfoDebugText(leafWindowInfo);
+      if (debugText) log(debugText);
       await speakGuarded(`${leafGamesMessage(leafGames, settings.minSampleSize)} Say ready to continue, or analyze to ask the engine.`);
       await waitForVoiceContinue();
     },
@@ -759,10 +779,11 @@ async function startManualQuiz(quizMode) {
       $('#manual-status').textContent = `Not quite — the move was ${correctSan}. Tap Continue when ready.`;
       await waitForManualContinue();
     },
-    onLineEnd: async ({ missed, leafGames }) => {
+    onLineEnd: async ({ missed, leafGames, leafWindowInfo }) => {
       if (missed) return;
       renderManualBoard(manualCurrentFen, null); // the line is done — clear the last-move highlight rather than leaving it up through the whole pause
-      $('#manual-status').textContent = `${leafGamesMessage(leafGames, settings.minSampleSize)} Look around, ask Analyze, or tap Continue when ready.`;
+      const debugText = windowInfoDebugText(leafWindowInfo);
+      $('#manual-status').textContent = `${leafGamesMessage(leafGames, settings.minSampleSize)} Look around, ask Analyze, or tap Continue when ready.${debugText ? ` (${debugText})` : ''}`;
       await waitForManualContinue();
     },
     onReplayStart: async () => {

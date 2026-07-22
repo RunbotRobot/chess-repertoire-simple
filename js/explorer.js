@@ -351,10 +351,13 @@ const MS_PER_MONTH = 30.44 * 24 * 60 * 60 * 1000;
 
 /**
  * Fetches (or serves from cache) one position and returns it as a
- * repertoire node: { games, myMove, alternates, opponentMoves }. Lazy —
- * this is the only place a network request for opening data happens;
- * quiz/browse call it exactly when they navigate to a position, not ahead
- * of time.
+ * repertoire node: { games, myMove, alternates, opponentMoves, windowInfo }.
+ * windowInfo ({windowMonths, totalGames, nextWindowMonths}, windowMonths/
+ * nextWindowMonths either a number of months or the FULL_HISTORY sentinel
+ * 'full') is debug/UI info about the adaptive history window described
+ * above, not used by scoring. Lazy — this is the only place a network
+ * request for opening data happens; quiz/browse call it exactly when they
+ * navigate to a position, not ahead of time.
  *
  * @param {string[]} uciPath moves from the start position, in UCI form
  * @param {'white'|'black'} color which repertoire this is for
@@ -376,19 +379,25 @@ export async function getPosition(uciPath, color, settings, opts = {}) {
   const { month, monthsBack } = await resolveMonthCached(queryParams, settings.lichessToken, opts);
   const key = cacheKeyFor(queryParams, month, uciPath);
 
+  const hintKey = windowHintKeyFor(queryParams, uciPath);
+  const targetGames = settings.targetGamesPerPosition || DEFAULT_TARGET_GAMES;
   const cached = await cache.getCached(key);
   const maxAgeMs = (settings.repertoireMaxAgeMonths || 1) * MS_PER_MONTH;
-  let raw, fetchedAt, cacheHit;
+  let raw, fetchedAt, cacheHit, windowMonths, totalGamesInWindow;
   if (cached && Date.now() - cached.fetchedAt < maxAgeMs) {
     raw = cached.data;
     fetchedAt = cached.fetchedAt;
     cacheHit = true;
+    // Debug/UI info only (see windowInfo below) — a cache hit doesn't fetch,
+    // so this is whatever the *last real fetch* used, not necessarily what
+    // a fetch right now would pick.
+    const hint = await cache.getWindowHint(hintKey);
+    windowMonths = hint?.windowMonths ?? null;
+    totalGamesInWindow = hint?.totalGames ?? null;
   } else {
     opts.onBeforeFetch?.();
-    const targetGames = settings.targetGamesPerPosition || DEFAULT_TARGET_GAMES;
-    const hintKey = windowHintKeyFor(queryParams, uciPath);
     const hint = await cache.getWindowHint(hintKey);
-    const windowMonths = nextWindowMonths(hint, targetGames);
+    windowMonths = nextWindowMonths(hint, targetGames);
 
     let perMonth;
     if (windowMonths === FULL_HISTORY) {
@@ -407,15 +416,22 @@ export async function getPosition(uciPath, color, settings, opts = {}) {
       }
     }
     raw = mergeMovesData(perMonth);
-    const totalGames = raw.moves.reduce((s, m) => s + (m.white || 0) + (m.draws || 0) + (m.black || 0), 0);
+    totalGamesInWindow = raw.moves.reduce((s, m) => s + (m.white || 0) + (m.draws || 0) + (m.black || 0), 0);
 
     await cache.putCached(key, raw);
-    await cache.putWindowHint(hintKey, { windowMonths, totalGames });
+    await cache.putWindowHint(hintKey, { windowMonths, totalGames: totalGamesInWindow });
     fetchedAt = Date.now();
     cacheHit = false;
   }
 
   const node = computeNodeFromRaw(raw, color, uciPath.length, settings);
+  // Debug/UI info: how much history this position's data actually came
+  // from, and — computed fresh against current settings, so it reflects any
+  // targetGamesPerPosition change immediately — what the *next* fetch would
+  // try. Attached to the node (rather than a separate return field) so it
+  // rides along wherever a node does, e.g. through quiz.js's getNode without
+  // that needing its own plumbing.
+  node.windowInfo = { windowMonths, totalGames: totalGamesInWindow, nextWindowMonths: nextWindowMonths({ windowMonths, totalGames: totalGamesInWindow }, targetGames) };
   return { node, cacheHit, fetchedAt, cacheKey: key };
 }
 
