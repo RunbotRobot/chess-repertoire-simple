@@ -14,7 +14,7 @@ import { Chess } from './vendor/chess.esm.js';
 // devtools is actually running the latest code, and it also drives the
 // service worker's cache name (see sw.js) so updates actually take effect
 // instead of being served stale from the offline cache.
-export const APP_VERSION = 26;
+export const APP_VERSION = 27;
 
 const COLOR_OPTIONS = ['white', 'black'];
 const RATING_OPTIONS = ['1000', '1200', '1400', '1600', '1800', '2000', '2200', '2500'];
@@ -761,10 +761,12 @@ async function startManualQuiz(quizMode) {
     },
     onLineEnd: async ({ missed, leafGames }) => {
       if (missed) return;
+      renderManualBoard(manualCurrentFen, null); // the line is done — clear the last-move highlight rather than leaving it up through the whole pause
       $('#manual-status').textContent = `${leafGamesMessage(leafGames, settings.minSampleSize)} Look around, ask Analyze, or tap Continue when ready.`;
       await waitForManualContinue();
     },
     onReplayStart: async () => {
+      manualLastMove = null; // clear the previous attempt's correction highlight before the replay's own first move renders
       $('#manual-replay-badge').style.display = 'inline-block';
       $('#manual-status').textContent = "Replaying that line for memorization…";
     },
