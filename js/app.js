@@ -14,7 +14,7 @@ import { Chess } from './vendor/chess.esm.js';
 // devtools is actually running the latest code, and it also drives the
 // service worker's cache name (see sw.js) so updates actually take effect
 // instead of being served stale from the offline cache.
-export const APP_VERSION = 30;
+export const APP_VERSION = 31;
 
 const COLOR_OPTIONS = ['white', 'black'];
 const RATING_OPTIONS = ['1000', '1200', '1400', '1600', '1800', '2000', '2200', '2500'];
@@ -171,13 +171,29 @@ $('#save-settings').addEventListener('click', () => {
 function cap(s) { return s[0].toUpperCase() + s.slice(1); }
 
 // Shared by both quiz modes: what to say when a line ends not because it
-// was missed, but because the position simply doesn't have enough games to
-// trust (see quiz.js's leafGames doc comment — every non-missed line ending
-// is this case, since computeNodeFromRaw only ever produces a leaf for
-// exactly this reason).
-function leafGamesMessage(leafGames, minSampleSize) {
+// was missed, but because the position doesn't offer a confident pick to
+// keep quizzing. leafReason (see explorer.js's computeNodeFromRaw doc)
+// distinguishes *why* — critically, "plenty of total games here" and
+// "confident pick available" are NOT the same thing: a position can clear
+// minSampleSize in aggregate while every individual move/reply stays under
+// it (e.g. 22 games split 8/7/7 against a 20 threshold), which used to get
+// reported with the same "not enough games" wording as genuine data
+// scarcity even though the total shown was already >= the threshold quoted
+// right next to it — confusing and, read literally, just wrong.
+function leafGamesMessage(leafGames, leafReason, settings) {
+  if (leafReason === 'max-depth') {
+    return "Reached the max depth limit set in Setup — not that the line necessarily ends here.";
+  }
+  if (leafReason === 'no-qualifying-move') {
+    return `${leafGames} games here, but no single move individually has ${settings.minSampleSize}+ of them — too split up to trust any one pick.`;
+  }
+  if (leafReason === 'no-qualifying-reply') {
+    const sharePct = Math.round(settings.opponentBranchMinShare * 100);
+    return `${leafGames} games here, but no single opponent reply is common enough to prepare for (need ${sharePct}%+ share or ${settings.opponentBranchMinGames}+ games).`;
+  }
+  // 'insufficient-total', or an older/unrecognized reason — genuine data scarcity.
   if (!leafGames) return "No games recorded at this position — you've reached the edge of known theory.";
-  return `Only ${leafGames} game${leafGames === 1 ? '' : 's'} here — not enough to trust (need ${minSampleSize}+).`;
+  return `Only ${leafGames} game${leafGames === 1 ? '' : 's'} here — not enough to trust (need ${settings.minSampleSize}+).`;
 }
 
 function formatWindowSize(months) {
@@ -586,14 +602,14 @@ async function startVoiceQuiz(quizMode) {
       await speakGuarded(`Not quite. The move was ${sanSpoken(correctSan)}. Say ready when you want to continue.`);
       await waitForVoiceContinue();
     },
-    onLineEnd: async ({ missed, leafGames, leafWindowInfo }) => {
+    onLineEnd: async ({ missed, leafGames, leafReason, leafWindowInfo }) => {
       if (missed) return;
       // The window/next-fetch detail is logged (visible in the debug log
       // panel) rather than spoken — useful for troubleshooting without
       // making the spoken message wordy.
       const debugText = windowInfoDebugText(leafWindowInfo);
       if (debugText) log(debugText);
-      await speakGuarded(`${leafGamesMessage(leafGames, settings.minSampleSize)} Say ready to continue, or analyze to ask the engine.`);
+      await speakGuarded(`${leafGamesMessage(leafGames, leafReason, settings)} Say ready to continue, or analyze to ask the engine.`);
       await waitForVoiceContinue();
     },
     onReplayStart: async () => {
@@ -781,11 +797,11 @@ async function startManualQuiz(quizMode) {
       $('#manual-status').textContent = `Not quite — the move was ${correctSan}. Tap Continue when ready.`;
       await waitForManualContinue();
     },
-    onLineEnd: async ({ missed, leafGames, leafWindowInfo }) => {
+    onLineEnd: async ({ missed, leafGames, leafReason, leafWindowInfo }) => {
       if (missed) return;
       renderManualBoard(manualCurrentFen, null); // the line is done — clear the last-move highlight rather than leaving it up through the whole pause
       const debugText = windowInfoDebugText(leafWindowInfo);
-      $('#manual-status').textContent = `${leafGamesMessage(leafGames, settings.minSampleSize)} Look around, ask Analyze, or tap Continue when ready.${debugText ? ` (${debugText})` : ''}`;
+      $('#manual-status').textContent = `${leafGamesMessage(leafGames, leafReason, settings)} Look around, ask Analyze, or tap Continue when ready.${debugText ? ` (${debugText})` : ''}`;
       await waitForManualContinue();
     },
     onReplayStart: async () => {

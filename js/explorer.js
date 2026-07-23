@@ -208,7 +208,11 @@ function computeNodeFromRaw(data, color, ply, settings) {
   const totalGames = moves.reduce((s, m) => s + (m.white || 0) + (m.draws || 0) + (m.black || 0), 0);
 
   if (totalGames < settings.minSampleSize || moves.length === 0) {
-    return { games: totalGames, myMove: null, opponentMoves: null }; // not enough data to trust this position; it's a leaf
+    // Genuine data scarcity: the position itself doesn't have enough games,
+    // full stop — leafReason lets the UI say exactly that rather than
+    // guessing (see the other two leafReason cases below, where totalGames
+    // alone clearing the bar does NOT imply a leaf below was avoidable).
+    return { games: totalGames, myMove: null, opponentMoves: null, leafReason: 'insufficient-total' };
   }
 
   const isMyMove = (ply % 2 === 0) === (color === 'white');
@@ -240,11 +244,19 @@ function computeNodeFromRaw(data, color, ply, settings) {
         if (Math.random() < 1 / tieCount) best = candidate;
       }
     }
+    if (!best) {
+      // totalGames cleared minSampleSize, but it was spread thin enough
+      // across moves that no single one did on its own — e.g. 22 games
+      // split 8/7/7 against a 20 threshold. Distinct from
+      // 'insufficient-total': the position isn't obscure, no candidate move
+      // individually is.
+      return { games: totalGames, myMove: null, alternates: [], opponentMoves: null, leafReason: 'no-qualifying-move' };
+    }
     // The other candidates aren't part of the repertoire (only one move is
     // ever quizzed per position), but Browse shows them for reference —
     // sorted the same way, highest-scoring first.
     const alternates = candidates.filter((c) => c !== best);
-    return { games: totalGames, myMove: best, alternates, opponentMoves: null };
+    return { games: totalGames, myMove: best, alternates, opponentMoves: null, leafReason: null };
   }
 
   // Keep every reply that's genuinely common; I need to be ready for it.
@@ -254,7 +266,16 @@ function computeNodeFromRaw(data, color, ply, settings) {
     .map((m) => ({ ...m, share: m.games / totalGames }))
     .filter((m) => m.share >= settings.opponentBranchMinShare || m.games >= settings.opponentBranchMinGames)
     .sort((a, b) => b.games - a.games);
-  return { games: totalGames, myMove: null, opponentMoves: kept };
+  if (kept.length === 0) {
+    // Same idea on the opponent side: plenty of total games, but scattered
+    // across replies too thin/rare to individually clear the "worth
+    // preparing for" bar. Returning opponentMoves: null (not []) here also
+    // matters mechanically — an empty array is truthy in JS, so quiz.js's
+    // `while (node.myMove || node.opponentMoves)` wouldn't otherwise
+    // recognize this as the leaf it actually is.
+    return { games: totalGames, myMove: null, opponentMoves: null, leafReason: 'no-qualifying-reply' };
+  }
+  return { games: totalGames, myMove: null, opponentMoves: kept, leafReason: null };
 }
 
 function explorerQueryParams(settings) {
@@ -351,13 +372,20 @@ const MS_PER_MONTH = 30.44 * 24 * 60 * 60 * 1000;
 
 /**
  * Fetches (or serves from cache) one position and returns it as a
- * repertoire node: { games, myMove, alternates, opponentMoves, windowInfo }.
- * windowInfo ({windowMonths, totalGames, nextWindowMonths}, windowMonths/
- * nextWindowMonths either a number of months or the FULL_HISTORY sentinel
- * 'full') is debug/UI info about the adaptive history window described
- * above, not used by scoring. Lazy — this is the only place a network
- * request for opening data happens; quiz/browse call it exactly when they
- * navigate to a position, not ahead of time.
+ * repertoire node: { games, myMove, alternates, opponentMoves, leafReason,
+ * windowInfo }. windowInfo ({windowMonths, totalGames, nextWindowMonths},
+ * windowMonths/nextWindowMonths either a number of months or the
+ * FULL_HISTORY sentinel 'full') is debug/UI info about the adaptive history
+ * window described above, not used by scoring. leafReason is null unless
+ * this is a leaf (myMove and opponentMoves both null), in which case it's
+ * one of 'insufficient-total' (games < minSampleSize — genuine data
+ * scarcity), 'no-qualifying-move' (enough total games, but no single
+ * candidate move individually reached minSampleSize), or
+ * 'no-qualifying-reply' (same idea for opponent replies against
+ * opponentBranchMinShare/opponentBranchMinGames) — see computeNodeFromRaw.
+ * Lazy — this is the only place a network request for opening data
+ * happens; quiz/browse call it exactly when they navigate to a position,
+ * not ahead of time.
  *
  * @param {string[]} uciPath moves from the start position, in UCI form
  * @param {'white'|'black'} color which repertoire this is for
@@ -372,7 +400,7 @@ export async function getPosition(uciPath, color, settings, opts = {}) {
   const cache = opts.cache || { getCached, putCached, getWindowHint, putWindowHint };
   const maxPlies = Number.isFinite(settings.maxPlies) ? settings.maxPlies : Infinity;
   if (uciPath.length >= maxPlies) {
-    return { node: { games: 0, myMove: null, opponentMoves: null }, cacheHit: true, fetchedAt: null, cacheKey: null };
+    return { node: { games: 0, myMove: null, opponentMoves: null, leafReason: 'max-depth' }, cacheHit: true, fetchedAt: null, cacheKey: null };
   }
 
   const queryParams = explorerQueryParams(settings);

@@ -119,10 +119,17 @@ export function renderBoard(container, fen, { orientation = 'white', lastMove = 
   // logic it exists for, and covers every container renderBoard is used in.
   container.style.touchAction = 'none';
 
-  // Reassigning onclick (rather than addEventListener) means re-rendering
-  // — which replaces all the child nodes anyway via innerHTML above —
-  // never stacks up duplicate handlers on the container itself.
-  container.onclick = interactive
+  // Reassigning onpointerdown (rather than addEventListener) means
+  // re-rendering — which replaces all the child nodes anyway via innerHTML
+  // above — never stacks up duplicate handlers on the container itself.
+  //
+  // This fires on pointerdown rather than click deliberately: a touch that
+  // drifts even a little between finger-down and finger-up makes browsers
+  // suppress the synthetic click (their heuristic for "was this a tap or
+  // the start of a drag/scroll"), which made board presses miss constantly
+  // even after touch-action:none fixed the scroll-hijacking. pointerdown
+  // fires the instant contact happens, before any movement can cancel it.
+  container.onpointerdown = interactive
     ? (e) => {
         const square = e.target.closest('[data-square]')?.getAttribute('data-square');
         if (square) interactive.onSquareClick(square);
