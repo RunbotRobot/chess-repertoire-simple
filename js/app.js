@@ -3,7 +3,7 @@ import { getPosition, peekPosition } from './explorer.js';
 import { getCacheStats, clearCache } from './positionCache.js';
 import { renderBoard } from './board.js';
 import * as speech from './speech.js';
-import { matchSpokenMove, sanToSpeech } from './chessUtil.js';
+import { matchSpokenMove, sanToSpeech, findClickedMove } from './chessUtil.js';
 import { QuizSession, ABORT, QuizAbort } from './quiz.js';
 import { Engine } from './engine.js';
 import { AnalysisSession } from './analysis.js';
@@ -14,7 +14,7 @@ import { Chess } from './vendor/chess.esm.js';
 // devtools is actually running the latest code, and it also drives the
 // service worker's cache name (see sw.js) so updates actually take effect
 // instead of being served stale from the offline cache.
-export const APP_VERSION = 31;
+export const APP_VERSION = 32;
 
 const COLOR_OPTIONS = ['white', 'black'];
 const RATING_OPTIONS = ['1000', '1200', '1400', '1600', '1800', '2000', '2200', '2500'];
@@ -266,9 +266,8 @@ let browseRequestId = 0;
 function handleBrowseSquareClick(square) {
   if (browseSelectedSquare) {
     if (square === browseSelectedSquare) { browseSelectedSquare = null; renderBrowse(); return; }
-    const matches = browseLegalMoves.filter((m) => m.from === browseSelectedSquare && m.to === square);
-    if (matches.length > 0) {
-      const move = matches.find((m) => m.promotion === 'q') || matches[0];
+    const move = findClickedMove(browseLegalMoves, browseSelectedSquare, square);
+    if (move) {
       browseSelectedSquare = null;
       attemptBrowseMove(move);
       return;
@@ -689,13 +688,8 @@ function handleManualSquareClick(square) {
       renderManualBoard(manualCurrentFen);
       return;
     }
-    const matches = manualLegalMoves.filter((m) => m.from === manualSelectedSquare && m.to === square);
-    if (matches.length > 0) {
-      // A pawn reaching the last rank offers one legal move per promotion
-      // choice, all sharing this from/to — always take the queen rather
-      // than showing an underpromotion picker; good enough for opening
-      // drilling, where underpromotions essentially never come up.
-      const move = matches.find((m) => m.promotion === 'q') || matches[0];
+    const move = findClickedMove(manualLegalMoves, manualSelectedSquare, square);
+    if (move) {
       const resolve = manualPendingResolve;
       manualPendingResolve = null;
       manualSelectedSquare = null;

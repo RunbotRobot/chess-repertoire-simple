@@ -1,9 +1,43 @@
 // Helpers that sit between chess.js and the speech layer: turning a SAN move
 // into something worth saying out loud, and turning a rough voice transcript
-// back into a legal move.
+// back into a legal move. Also click-to-move's own from/to matching, shared
+// by Browse and manual quiz so both get the same castling behavior.
 
 const PIECE_WORDS = { N: 'knight', B: 'bishop', R: 'rook', Q: 'queen', K: 'king' };
 const PIECE_LETTERS = Object.fromEntries(Object.entries(PIECE_WORDS).map(([l, w]) => [w, l]));
+
+// chess.js represents castling as the king's own two-square hop (e.g.
+// e1->g1 for White kingside) — that's what a move's `to` actually is, and
+// what the rest of the app (uci comparisons against cached Lichess data,
+// applyUci in quiz.js) all key off. But several chess UIs, including
+// lichess.org's own board, also accept "tap the king, then tap its own
+// rook" as a castling gesture, since that's closer to the physical motion.
+// This maps each castling destination to that rook's home square, purely so
+// board taps can recognize the gesture — it never changes what move is
+// actually played.
+export const CASTLE_ROOK_SQUARE = { g1: 'h1', c1: 'a1', g8: 'h8', c8: 'a8' };
+
+/**
+ * Resolves which legal move (if any) a click/tap on `to` means, given a
+ * piece already selected on `from`. Prefers a direct destination match;
+ * falls back to the king-taps-its-rook castling gesture (see
+ * CASTLE_ROOK_SQUARE) when `to` is a rook's home square rather than the
+ * king's own landing square. A pawn reaching the last rank offers one move
+ * per promotion choice sharing the same from/to — always resolves to queen
+ * rather than showing an underpromotion picker, which is fine for opening
+ * drilling.
+ * @param {Array<{from:string,to:string,promotion?:string,flags?:string}>} legalMoves
+ * @param {string} from
+ * @param {string} to
+ * @returns {{from:string,to:string,san:string}|null}
+ */
+export function findClickedMove(legalMoves, from, to) {
+  const direct = legalMoves.filter((m) => m.from === from && m.to === to);
+  if (direct.length > 0) return direct.find((m) => m.promotion === 'q') || direct[0];
+  const castleDest = Object.keys(CASTLE_ROOK_SQUARE).find((dest) => CASTLE_ROOK_SQUARE[dest] === to);
+  if (!castleDest) return null;
+  return legalMoves.find((m) => m.from === from && m.to === castleDest && (m.flags?.includes('k') || m.flags?.includes('q'))) || null;
+}
 
 export function sanToSpeech(san) {
   if (!san) return '';
