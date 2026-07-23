@@ -111,6 +111,14 @@ export function renderBoard(container, fen, { orientation = 'white', lastMove = 
 
   container.innerHTML = `<svg viewBox="0 0 ${px} ${px}" width="100%" height="100%" role="img" aria-label="Chess board">${squaresSvg.join('')}</svg>`;
 
+  // Without this, a touch that starts on the board is ambiguous to the
+  // browser — it waits to see if it turns into a scroll/pan before
+  // committing to a tap, which is exactly what made board presses
+  // unreliable (registering as a scroll, or just eating the tap). Setting
+  // this here rather than in CSS keeps it colocated with the interactive
+  // logic it exists for, and covers every container renderBoard is used in.
+  container.style.touchAction = 'none';
+
   // Reassigning onclick (rather than addEventListener) means re-rendering
   // — which replaces all the child nodes anyway via innerHTML above —
   // never stacks up duplicate handlers on the container itself.
