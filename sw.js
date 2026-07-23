@@ -7,7 +7,7 @@
 // worker (and thus only re-fetches the shell) when sw.js's own bytes
 // change — if this string doesn't change, updates to app.js/explorer.js/etc.
 // silently never reach clients, no matter how many times they're deployed.
-const CACHE = 'opening-drill-v32';
+const CACHE = 'opening-drill-v33';
 const SHELL_FILES = [
   './',
   './index.html',
@@ -38,7 +38,17 @@ const SHELL_FILES = [
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
-    caches.open(CACHE).then((cache) => cache.addAll(SHELL_FILES)).then(() => self.skipWaiting())
+    caches.open(CACHE).then((cache) =>
+      // cache.addAll() fetches with the browser's normal HTTP caching
+      // behavior — if a shell file still has a live HTTP-cache entry from
+      // before this deploy (GitHub Pages does send caching headers), that
+      // stale copy can get read straight into the *new* CACHE bucket even
+      // though its name correctly changed, defeating the whole point of
+      // bumping it: a real deploy could sit invisible behind a refresh
+      // indefinitely. {cache: 'reload'} forces every one of these fetches
+      // past the HTTP cache, onto the real network, every install.
+      Promise.all(SHELL_FILES.map((url) => fetch(url, { cache: 'reload' }).then((res) => cache.put(url, res))))
+    ).then(() => self.skipWaiting())
   );
 });
 
