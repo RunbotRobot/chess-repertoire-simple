@@ -166,9 +166,10 @@ handlers shape:
                                                         it's always "too few total games," e.g.
                                                         'no-qualifying-move' means the opposite: plenty of total
                                                         games, just none concentrated enough in one move to
-                                                        trust it. leafWindowInfo ({windowMonths, totalGames,
-                                                        nextWindowMonths} — see explorer.js's getPosition) is
-                                                        debug/UI info about the leaf's data. All three are
+                                                        trust it, even after escalating through every history
+                                                        tier. leafWindowInfo ({windowMonths, totalGames} — see
+                                                        explorer.js's getPosition) is debug/UI info about which
+                                                        tier the leaf's data actually came from. All three are
                                                         meaningful only when !missed, same as leafGames. Both
                                                         handlers are awaited before the session moves on, which
                                                         is deliberate:

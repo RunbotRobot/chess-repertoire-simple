@@ -14,7 +14,7 @@ import { Chess } from './vendor/chess.esm.js';
 // devtools is actually running the latest code, and it also drives the
 // service worker's cache name (see sw.js) so updates actually take effect
 // instead of being served stale from the offline cache.
-export const APP_VERSION = 33;
+export const APP_VERSION = 34;
 
 const COLOR_OPTIONS = ['white', 'black'];
 const RATING_OPTIONS = ['1000', '1200', '1400', '1600', '1800', '2000', '2200', '2500'];
@@ -111,7 +111,6 @@ function fillSettingsForm() {
   $('#opponentBranchMinGames').value = settings.opponentBranchMinGames;
   $('#maxPlies').value = Number.isFinite(settings.maxPlies) ? settings.maxPlies : '';
   $('#repertoireMaxAgeMonths').value = settings.repertoireMaxAgeMonths;
-  $('#targetGamesPerPosition').value = settings.targetGamesPerPosition;
   $('#alwaysReplayOnSuccess').checked = settings.alwaysReplayOnSuccess;
   $('#dimScreenDuringQuiz').checked = settings.dimScreenDuringQuiz;
   $('#showDebugLog').checked = readDebugPref();
@@ -151,7 +150,6 @@ function readSettingsForm() {
     // Blank genuinely means "no ply cap" here, not "use the default".
     maxPlies: $('#maxPlies').value.trim() === '' ? Infinity : Number($('#maxPlies').value),
     repertoireMaxAgeMonths: Number($('#repertoireMaxAgeMonths').value) || DEFAULT_SETTINGS.repertoireMaxAgeMonths,
-    targetGamesPerPosition: Number($('#targetGamesPerPosition').value) || DEFAULT_SETTINGS.targetGamesPerPosition,
     alwaysReplayOnSuccess: $('#alwaysReplayOnSuccess').checked,
     dimScreenDuringQuiz: $('#dimScreenDuringQuiz').checked,
     voiceURI: $('#voiceSelect').value || null,
@@ -201,14 +199,17 @@ function formatWindowSize(months) {
   return months === 'full' ? 'full history' : `${months} month${months === 1 ? '' : 's'}`;
 }
 
-// Testing/debugging detail about the adaptive history window (see
-// explorer.js's header comment) behind a leaf: how much history this
-// position's data actually came from, and what the next fetch would try —
-// separate from leafGamesMessage since it's not something worth reading
-// aloud in voice mode, only logging.
+// Testing/debugging detail about the history window behind a leaf (see
+// explorer.js's header comment on the 1mo/12mo/all-time escalation): how
+// much history this position's data actually came from. By the time a leaf
+// reaches this message, getPosition has already escalated as far as it
+// goes — there's no "next fetch will try X" to report anymore, since a
+// leaf now only happens once all-time history has also been tried and
+// still came up short. Separate from leafGamesMessage since it's not
+// something worth reading aloud in voice mode, only logging.
 function windowInfoDebugText(windowInfo) {
   if (!windowInfo) return null;
-  return `window: fetched ${formatWindowSize(windowInfo.windowMonths)} (${windowInfo.totalGames} games); next fetch will try ${formatWindowSize(windowInfo.nextWindowMonths)}.`;
+  return `window: ${formatWindowSize(windowInfo.windowMonths)} (${windowInfo.totalGames} games).`;
 }
 
 // ---------- position cache status ----------

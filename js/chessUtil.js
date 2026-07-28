@@ -17,6 +17,36 @@ const PIECE_LETTERS = Object.fromEntries(Object.entries(PIECE_WORDS).map(([l, w]
 // actually played.
 export const CASTLE_ROOK_SQUARE = { g1: 'h1', c1: 'a1', g8: 'h8', c8: 'a8' };
 
+// Confirmed live against the real API (not just docs): Lichess's opening
+// explorer represents a castling move's uci as the king "capturing" its own
+// rook — e.g. e1h1 for White kingside — rather than chess.js's own
+// two-square king hop (e1g1) that applyUci (quiz.js) and the from/to
+// comparisons throughout this app all expect. Left unnormalized, every
+// castling move sourced from Lichess data fails outright: chess.js rejects
+// {from:'e1', to:'h1'} as an illegal king move (there's a friendly piece
+// there), so both playing my own castling move and the opponent castling
+// throw "Invalid move" mid-quiz. Standard (non-Chess960) chess always has
+// the king on e1/e8 whenever it's legal to castle, so this mapping is exact
+// and total — never a Chess960 wrinkle. Derived from CASTLE_ROOK_SQUARE
+// (inverted) so the two tables can't drift apart.
+const CASTLE_UCI_ROOK_TO_KING = Object.fromEntries(
+  Object.entries(CASTLE_ROOK_SQUARE).map(([kingDest, rookSquare]) => {
+    const from = rookSquare === 'h1' || rookSquare === 'a1' ? 'e1' : 'e8';
+    return [`${from}${rookSquare}`, `${from}${kingDest}`];
+  })
+);
+
+/**
+ * Normalizes a uci string sourced from Lichess data into the form chess.js
+ * (and the rest of this app) expects, fixing up the king-captures-rook
+ * castling notation described above. A no-op for every non-castling move.
+ * @param {string} uci
+ * @returns {string}
+ */
+export function normalizeLichessUci(uci) {
+  return CASTLE_UCI_ROOK_TO_KING[uci] || uci;
+}
+
 /**
  * Resolves which legal move (if any) a click/tap on `to` means, given a
  * piece already selected on `from`. Prefers a direct destination match;

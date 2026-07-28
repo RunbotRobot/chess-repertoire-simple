@@ -36,31 +36,38 @@
 // storage.js's loadResolvedMonth) rather than re-resolving it itself, so
 // opening the Browse tab never makes a request of its own.
 //
-// Adaptive history window: a single calendar month of games is plenty of
-// sample size for a heavily-played position, but nowhere near enough for an
-// obscure one — and conversely, a well-known position's single month is
-// already *more* than enough, so padding it with a year of history would
-// just be diluting "current knowledge" with stale games. Since a single
-// query can only ever cover one calendar month (see above), a wider window
-// is built by querying multiple consecutive months separately and summing
-// them — there's no other way to ask Lichess for more than one month at a
-// time. How many months to pull is decided adaptively per position: after
-// each real fetch, the resulting {windowMonths, totalGames} is saved (via
-// positionCache.js's windowHints store, keyed without the month so it
-// survives month rollovers) and used to compute a new window size next time
-// — scaled proportionally toward whatever would have hit
-// targetGamesPerPosition (e.g. if 3 months yielded 300 games against a
-// 1000 target, next time try roughly 3 * 1000/300 = 10 months), clamped to
-// [1, MAX_WINDOW_MONTHS]. This converges in a step or two for most
-// positions without needing to actually search within a single fetch,
-// which would mean an unbounded number of requests (and an unbounded quiz-
-// time wait) triggered by one lazy lookup. A position that's still short of
-// target even at MAX_WINDOW_MONTHS escalates once more to FULL_HISTORY — a
-// single request with no since/until at all, covering everything Lichess
-// has indexed for it — since month-by-month clearly isn't going to get
-// there no matter how far back it goes.
-import { getCached, putCached, getWindowHint, putWindowHint } from './positionCache.js';
+// History window: a single calendar month of games is plenty of sample size
+// for a heavily-played position, but nowhere near enough for an obscure
+// one. Rather than a single fixed window, or a formula trying to predict
+// the "right" size up front, a position is tried at three fixed tiers —
+// 1 month, then 12 months, then all-time (no since/until at all) — moving
+// to the next tier only when the current one actually produces a leaf for
+// lack of data (see computeNodeFromRaw's leafReason: 'insufficient-total',
+// 'no-qualifying-move', or 'no-qualifying-reply' — NOT 'max-depth', which
+// has nothing to do with data volume). A well-covered position almost
+// always resolves at 1 month and never pays for the wider tiers at all.
+// This all happens synchronously within one getPosition() call — a
+// position genuinely obscure enough to need it costs a handful of extra
+// requests on that one lazy lookup, but the result is that a leaf is never
+// shown to the user as "not enough games" until all-time history has
+// actually been tried and still wasn't enough. (An earlier version tried
+// to predict window size proportionally from the previous fetch's
+// game density, persisted across sessions via positionCache.js's
+// windowHints store — the predicted size only ever took effect on a
+// *separate*, *later* real fetch, gated behind repertoireMaxAgeMonths
+// cache staleness. In practice that meant re-quizzing the same obscure
+// position within that freshness window kept re-showing the same small
+// window's leaf every time, never actually growing — the escalation
+// existed on paper but essentially never fired. Doing it inline, reactively,
+// within the lookup that needs it fixes that outright.)
+//
+// Since a single query can only ever cover one calendar month (see below),
+// the 12-month tier is built by querying 12 consecutive months separately
+// and summing them — there's no other way to ask Lichess for more than one
+// month at a time.
+import { getCached, putCached } from './positionCache.js';
 import { loadResolvedMonth, saveResolvedMonth } from './storage.js';
+import { normalizeLichessUci } from './chessUtil.js';
 
 const EXPLORER_URL = 'https://explorer.lichess.org/lichess';
 
@@ -229,7 +236,7 @@ function computeNodeFromRaw(data, color, ply, settings) {
       const n = (m.white || 0) + (m.draws || 0) + (m.black || 0);
       if (n < settings.minSampleSize) continue;
       const wins = color === 'white' ? (m.white || 0) : (m.black || 0);
-      candidates.push({ uci: m.uci, san: m.san, games: n, score: wins / n });
+      candidates.push({ uci: normalizeLichessUci(m.uci), san: m.san, games: n, score: wins / n });
     }
     candidates.sort((a, b) => b.score - a.score || b.games - a.games);
 
@@ -261,7 +268,7 @@ function computeNodeFromRaw(data, color, ply, settings) {
 
   // Keep every reply that's genuinely common; I need to be ready for it.
   const kept = moves
-    .map((m) => ({ uci: m.uci, san: m.san, games: (m.white || 0) + (m.draws || 0) + (m.black || 0) }))
+    .map((m) => ({ uci: normalizeLichessUci(m.uci), san: m.san, games: (m.white || 0) + (m.draws || 0) + (m.black || 0) }))
     .filter((m) => m.games > 0)
     .map((m) => ({ ...m, share: m.games / totalGames }))
     .filter((m) => m.share >= settings.opponentBranchMinShare || m.games >= settings.opponentBranchMinGames)
@@ -295,57 +302,24 @@ function cacheKeyFor(queryParams, month, uciPath) {
   return `${month}::${queryParams.variant}::${queryParams.speeds}::${queryParams.ratings}::${uciPath.join(',')}`;
 }
 
-// Unlike cacheKeyFor, deliberately excludes the month — this key tracks
-// "how big a window did this position need," which should persist across
-// month rollovers rather than resetting every time the queryable month
-// (and therefore the main cache key) advances.
-function windowHintKeyFor(queryParams, uciPath) {
-  return `${queryParams.variant}::${queryParams.speeds}::${queryParams.ratings}::${uciPath.join(',')}`;
-}
-
-const DEFAULT_TARGET_GAMES = 1000;
-// Hard cap on how many months one position's window can grow to via the
-// month-by-month path, regardless of how far the games count remains under
-// target — bounds the worst case of a single lazy fetch (a live quiz
-// waiting on this) to a fixed number of sequential requests. Once a
-// position is stuck at this cap and still short of target, the window
-// escalates once more to FULL_HISTORY (see below) rather than growing
-// month-by-month forever.
-const MAX_WINDOW_MONTHS = 12;
+// The three fixed window tiers (see header comment). YEAR_TIER_MONTHS is
+// the second tier's size; the first is always exactly 1 month, inline
+// below, so it doesn't need its own named constant.
+const YEAR_TIER_MONTHS = 12;
 
 // A sentinel window "size" meaning "don't filter by date at all — ask for
-// this position's entire indexed history in one request." Reserved for
-// positions so obscure that even MAX_WINDOW_MONTHS of monthly requests
-// couldn't reach the target; there's nowhere further to grow from here, so
-// (unlike the numeric sizes) this never shrinks back down once reached.
-// Unlike the single-month-omitted case documented above (confirmed live to
-// return 0 games), this omits *both* since and until — untested against the
-// real API from this dev sandbox (network policy blocks lichess.org here),
-// but is what the explorer's own docs describe as the actual no-filter
-// default, and is a materially different request than the broken case.
+// this position's entire indexed history in one request." This omits
+// *both* since and until — what the explorer's own docs describe as the
+// actual no-filter default, and a materially different request than the
+// single-month-omitted case documented above (confirmed live to return 0
+// games).
 const FULL_HISTORY = 'full';
 
-// Proportionally scales the window toward whatever would have hit the
-// target last time, based on the games-per-month density actually observed
-// (totalGames / windowMonths) — a single step gets close for most
-// positions rather than crawling one month at a time. No prior hint (a
-// position's very first-ever fetch) starts at the cheapest possible probe,
-// 1 month; a prior fetch that came back completely empty doubles the
-// window rather than dividing by zero. Once already at FULL_HISTORY, or
-// once the month-by-month window is maxed out and still short of target,
-// escalates to (or stays at) FULL_HISTORY instead of continuing to grow
-// (or re-probe) month by month.
-function nextWindowMonths(hint, targetGames) {
-  if (!hint || !hint.windowMonths) return 1;
-  if (hint.windowMonths === FULL_HISTORY) return FULL_HISTORY;
-  const atCap = hint.windowMonths >= MAX_WINDOW_MONTHS;
-  if (!hint.totalGames || hint.totalGames <= 0) {
-    return atCap ? FULL_HISTORY : Math.min(MAX_WINDOW_MONTHS, Math.max(hint.windowMonths * 2, 2));
-  }
-  if (hint.totalGames < targetGames && atCap) return FULL_HISTORY;
-  const scaled = Math.round((hint.windowMonths * targetGames) / hint.totalGames);
-  return Math.max(1, Math.min(MAX_WINDOW_MONTHS, scaled));
-}
+// Which leafReasons mean "this leaf is purely a data-volume problem, and a
+// wider window might fix it" — worth escalating the window tier for.
+// 'max-depth' is deliberately excluded: that's a ply-count cap, unrelated
+// to how much history was fetched, and widening the window can't change it.
+const LEAF_REASONS_NEEDING_MORE_HISTORY = new Set(['insufficient-total', 'no-qualifying-move', 'no-qualifying-reply']);
 
 // Combines several months' raw explorer responses into one, summing game
 // counts per move (uci) across all of them. A move missing from some
@@ -370,19 +344,43 @@ function mergeMovesData(perMonthResponses) {
 // month) — an average month length is precise enough for a staleness check.
 const MS_PER_MONTH = 30.44 * 24 * 60 * 60 * 1000;
 
+// Fetches `count` consecutive months, starting `monthsBack` months before
+// now, sequentially rather than in parallel — gentler on Lichess's server
+// for the (rare) obscure position that ends up needing the wider tiers, in
+// keeping with the whole lazy-fetch design's goal of minimizing server
+// strain over raw speed.
+async function fetchMonths(queryParams, uciPath, monthsBack, count, token, opts) {
+  const perMonth = [];
+  for (let i = 0; i < count; i++) {
+    const monthToFetch = monthString(-(monthsBack + i));
+    const url = buildExplorerUrl({ ...queryParams, since: monthToFetch, until: monthToFetch, play: uciPath.join(',') });
+    perMonth.push(await fetchExplorerRaw(url, { signal: opts.signal, token }));
+  }
+  return perMonth;
+}
+
+async function fetchFullHistory(queryParams, uciPath, token, opts) {
+  const url = buildExplorerUrl({ ...queryParams, play: uciPath.join(',') }); // no since/until at all
+  return [await fetchExplorerRaw(url, { signal: opts.signal, token })];
+}
+
 /**
  * Fetches (or serves from cache) one position and returns it as a
  * repertoire node: { games, myMove, alternates, opponentMoves, leafReason,
- * windowInfo }. windowInfo ({windowMonths, totalGames, nextWindowMonths},
- * windowMonths/nextWindowMonths either a number of months or the
- * FULL_HISTORY sentinel 'full') is debug/UI info about the adaptive history
- * window described above, not used by scoring. leafReason is null unless
- * this is a leaf (myMove and opponentMoves both null), in which case it's
- * one of 'insufficient-total' (games < minSampleSize — genuine data
- * scarcity), 'no-qualifying-move' (enough total games, but no single
- * candidate move individually reached minSampleSize), or
- * 'no-qualifying-reply' (same idea for opponent replies against
- * opponentBranchMinShare/opponentBranchMinGames) — see computeNodeFromRaw.
+ * windowInfo }. windowInfo ({windowMonths, totalGames}, windowMonths either
+ * a number of months or the FULL_HISTORY sentinel 'full') is debug/UI info
+ * about which history tier this position's data actually came from, not
+ * used by scoring. leafReason is null unless this is a leaf (myMove and
+ * opponentMoves both null), in which case it's one of 'insufficient-total'
+ * (games < minSampleSize — genuine data scarcity), 'no-qualifying-move'
+ * (enough total games, but no single candidate move individually reached
+ * minSampleSize), or 'no-qualifying-reply' (same idea for opponent replies
+ * against opponentBranchMinShare/opponentBranchMinGames) — see
+ * computeNodeFromRaw. On a real fetch (not a cache hit), any of those three
+ * leafReasons triggers escalating to the next history tier before giving
+ * up — see the header comment — so a leaf reaching the caller with one of
+ * those reasons means all-time history has already been tried and still
+ * wasn't enough, not just whatever the first tier happened to find.
  * Lazy — this is the only place a network request for opening data
  * happens; quiz/browse call it exactly when they navigate to a position,
  * not ahead of time.
@@ -390,14 +388,14 @@ const MS_PER_MONTH = 30.44 * 24 * 60 * 60 * 1000;
  * @param {string[]} uciPath moves from the start position, in UCI form
  * @param {'white'|'black'} color which repertoire this is for
  * @param {object} settings
- * @param {{signal?: AbortSignal, onBeforeFetch?: () => void, cache?: {getCached, putCached, getWindowHint, putWindowHint}}} opts
+ * @param {{signal?: AbortSignal, onBeforeFetch?: () => void, cache?: {getCached, putCached}}} opts
  *   onBeforeFetch fires synchronously, only when a real network request is
  *   about to happen (not on a cache hit) — the hook for "hold on, fetching…"
  *   UX. cache defaults to the real IndexedDB-backed one; tests inject a
  *   fake in-memory implementation instead.
  */
 export async function getPosition(uciPath, color, settings, opts = {}) {
-  const cache = opts.cache || { getCached, putCached, getWindowHint, putWindowHint };
+  const cache = opts.cache || { getCached, putCached };
   const maxPlies = Number.isFinite(settings.maxPlies) ? settings.maxPlies : Infinity;
   if (uciPath.length >= maxPlies) {
     return { node: { games: 0, myMove: null, opponentMoves: null, leafReason: 'max-depth' }, cacheHit: true, fetchedAt: null, cacheKey: null };
@@ -406,60 +404,49 @@ export async function getPosition(uciPath, color, settings, opts = {}) {
   const queryParams = explorerQueryParams(settings);
   const { month, monthsBack } = await resolveMonthCached(queryParams, settings.lichessToken, opts);
   const key = cacheKeyFor(queryParams, month, uciPath);
+  const token = settings.lichessToken;
 
-  const hintKey = windowHintKeyFor(queryParams, uciPath);
-  const targetGames = settings.targetGamesPerPosition || DEFAULT_TARGET_GAMES;
-  const cached = await cache.getCached(key);
+  const cachedEntry = await cache.getCached(key);
   const maxAgeMs = (settings.repertoireMaxAgeMonths || 1) * MS_PER_MONTH;
-  let raw, fetchedAt, cacheHit, windowMonths, totalGamesInWindow;
-  if (cached && Date.now() - cached.fetchedAt < maxAgeMs) {
-    raw = cached.data;
-    fetchedAt = cached.fetchedAt;
+  let raw, fetchedAt, cacheHit, windowMonths;
+  if (cachedEntry && Date.now() - cachedEntry.fetchedAt < maxAgeMs) {
+    raw = cachedEntry.data;
+    fetchedAt = cachedEntry.fetchedAt;
     cacheHit = true;
-    // Debug/UI info only (see windowInfo below) — a cache hit doesn't fetch,
-    // so this is whatever the *last real fetch* used, not necessarily what
-    // a fetch right now would pick.
-    const hint = await cache.getWindowHint(hintKey);
-    windowMonths = hint?.windowMonths ?? null;
-    totalGamesInWindow = hint?.totalGames ?? null;
+    // windowMonths rides along inside the cached data itself (see below) —
+    // ?? 1 covers a cache entry written before this field existed.
+    windowMonths = raw.windowMonths ?? 1;
   } else {
     opts.onBeforeFetch?.();
-    const hint = await cache.getWindowHint(hintKey);
-    windowMonths = nextWindowMonths(hint, targetGames);
 
-    let perMonth;
-    if (windowMonths === FULL_HISTORY) {
-      const url = buildExplorerUrl({ ...queryParams, play: uciPath.join(',') }); // no since/until at all
-      perMonth = [await fetchExplorerRaw(url, { signal: opts.signal, token: settings.lichessToken })];
-    } else {
-      // One request per month, sequentially rather than in parallel —
-      // gentler on Lichess's server for the (rare) obscure position whose
-      // window has grown large, in keeping with the whole lazy-fetch
-      // design's goal of minimizing server strain over raw speed.
-      perMonth = [];
-      for (let i = 0; i < windowMonths; i++) {
-        const monthToFetch = monthString(-(monthsBack + i));
-        const url = buildExplorerUrl({ ...queryParams, since: monthToFetch, until: monthToFetch, play: uciPath.join(',') });
-        perMonth.push(await fetchExplorerRaw(url, { signal: opts.signal, token: settings.lichessToken }));
+    let perMonth = await fetchMonths(queryParams, uciPath, monthsBack, 1, token, opts);
+    windowMonths = 1;
+    raw = mergeMovesData(perMonth);
+
+    if (LEAF_REASONS_NEEDING_MORE_HISTORY.has(computeNodeFromRaw(raw, color, uciPath.length, settings).leafReason)) {
+      perMonth = perMonth.concat(await fetchMonths(queryParams, uciPath, monthsBack + 1, YEAR_TIER_MONTHS - 1, token, opts));
+      windowMonths = YEAR_TIER_MONTHS;
+      raw = mergeMovesData(perMonth);
+
+      if (LEAF_REASONS_NEEDING_MORE_HISTORY.has(computeNodeFromRaw(raw, color, uciPath.length, settings).leafReason)) {
+        windowMonths = FULL_HISTORY;
+        raw = mergeMovesData(await fetchFullHistory(queryParams, uciPath, token, opts));
       }
     }
-    raw = mergeMovesData(perMonth);
-    totalGamesInWindow = raw.moves.reduce((s, m) => s + (m.white || 0) + (m.draws || 0) + (m.black || 0), 0);
 
+    raw = { ...raw, windowMonths };
     await cache.putCached(key, raw);
-    await cache.putWindowHint(hintKey, { windowMonths, totalGames: totalGamesInWindow });
     fetchedAt = Date.now();
     cacheHit = false;
   }
 
   const node = computeNodeFromRaw(raw, color, uciPath.length, settings);
-  // Debug/UI info: how much history this position's data actually came
-  // from, and — computed fresh against current settings, so it reflects any
-  // targetGamesPerPosition change immediately — what the *next* fetch would
-  // try. Attached to the node (rather than a separate return field) so it
-  // rides along wherever a node does, e.g. through quiz.js's getNode without
-  // that needing its own plumbing.
-  node.windowInfo = { windowMonths, totalGames: totalGamesInWindow, nextWindowMonths: nextWindowMonths({ windowMonths, totalGames: totalGamesInWindow }, targetGames) };
+  const totalGames = raw.moves.reduce((s, m) => s + (m.white || 0) + (m.draws || 0) + (m.black || 0), 0);
+  // Debug/UI info: which tier this position's data actually came from, and
+  // how many games it found there. Attached to the node (rather than a
+  // separate return field) so it rides along wherever a node does, e.g.
+  // through quiz.js's getNode without that needing its own plumbing.
+  node.windowInfo = { windowMonths, totalGames };
   return { node, cacheHit, fetchedAt, cacheKey: key };
 }
 
