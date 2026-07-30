@@ -364,6 +364,37 @@ async function fetchFullHistory(queryParams, uciPath, token, opts) {
   return [await fetchExplorerRaw(url, { signal: opts.signal, token })];
 }
 
+// Given a position's data at whatever tier it's currently at (1 month, 12
+// months, or already all-time), escalates it further if it's still a leaf
+// for lack of data and there's a wider tier left to try. Deliberately
+// applies the SAME regardless of whether that starting data came from a
+// fresh tier-1 fetch or a cache hit — a cached "not enough yet" result
+// isn't actually done just because it's still within its freshness window;
+// caching exists to skip redundant requests for data that's good, not to
+// lock in an under-resourced leaf until the cache happens to go stale.
+// (windowMonths is always exactly 1, YEAR_TIER_MONTHS, or FULL_HISTORY
+// here — those are the only values getPosition ever writes back out, so
+// there's no intermediate case to handle.)
+async function escalateIfNeeded(raw, windowMonths, { queryParams, uciPath, monthsBack, color, settings, token, opts, onEscalating }) {
+  let escalated = false;
+  const isLeafForLackOfData = (r) => LEAF_REASONS_NEEDING_MORE_HISTORY.has(computeNodeFromRaw(r, color, uciPath.length, settings).leafReason);
+
+  if (windowMonths === 1 && isLeafForLackOfData(raw)) {
+    onEscalating();
+    const rest = await fetchMonths(queryParams, uciPath, monthsBack + 1, YEAR_TIER_MONTHS - 1, token, opts);
+    raw = mergeMovesData([raw, ...rest]);
+    windowMonths = YEAR_TIER_MONTHS;
+    escalated = true;
+  }
+  if (windowMonths === YEAR_TIER_MONTHS && isLeafForLackOfData(raw)) {
+    onEscalating();
+    raw = mergeMovesData(await fetchFullHistory(queryParams, uciPath, token, opts));
+    windowMonths = FULL_HISTORY;
+    escalated = true;
+  }
+  return { raw, windowMonths, escalated };
+}
+
 /**
  * Fetches (or serves from cache) one position and returns it as a
  * repertoire node: { games, myMove, alternates, opponentMoves, leafReason,
@@ -376,11 +407,18 @@ async function fetchFullHistory(queryParams, uciPath, token, opts) {
  * (enough total games, but no single candidate move individually reached
  * minSampleSize), or 'no-qualifying-reply' (same idea for opponent replies
  * against opponentBranchMinShare/opponentBranchMinGames) — see
- * computeNodeFromRaw. On a real fetch (not a cache hit), any of those three
- * leafReasons triggers escalating to the next history tier before giving
- * up — see the header comment — so a leaf reaching the caller with one of
- * those reasons means all-time history has already been tried and still
- * wasn't enough, not just whatever the first tier happened to find.
+ * computeNodeFromRaw. Any of those three leafReasons triggers escalating to
+ * the next history tier before giving up — see the header comment — so a
+ * leaf reaching the caller with one of those reasons means all-time
+ * history has already been tried and still wasn't enough, not just
+ * whatever the first tier happened to find. Critically, this escalation
+ * check runs even on a cache hit: a cached entry that's still a leaf and
+ * hasn't yet been tried at every tier gets escalated right now rather than
+ * served as-is just because it's within its freshness window — otherwise a
+ * position that was insufficient at 1 month the first time it was ever
+ * fetched would keep re-showing that same stale, un-escalated leaf on
+ * every read until the cache happened to go stale, which could be a long
+ * wait (repertoireMaxAgeMonths defaults to a full month).
  * Lazy — this is the only place a network request for opening data
  * happens; quiz/browse call it exactly when they navigate to a position,
  * not ahead of time.
@@ -390,9 +428,10 @@ async function fetchFullHistory(queryParams, uciPath, token, opts) {
  * @param {object} settings
  * @param {{signal?: AbortSignal, onBeforeFetch?: () => void, cache?: {getCached, putCached}}} opts
  *   onBeforeFetch fires synchronously, only when a real network request is
- *   about to happen (not on a cache hit) — the hook for "hold on, fetching…"
- *   UX. cache defaults to the real IndexedDB-backed one; tests inject a
- *   fake in-memory implementation instead.
+ *   about to happen — including when a cache hit turns out to need
+ *   escalating — the hook for "hold on, fetching…" UX. cache defaults to
+ *   the real IndexedDB-backed one; tests inject a fake in-memory
+ *   implementation instead.
  */
 export async function getPosition(uciPath, color, settings, opts = {}) {
   const cache = opts.cache || { getCached, putCached };
@@ -408,37 +447,36 @@ export async function getPosition(uciPath, color, settings, opts = {}) {
 
   const cachedEntry = await cache.getCached(key);
   const maxAgeMs = (settings.repertoireMaxAgeMonths || 1) * MS_PER_MONTH;
-  let raw, fetchedAt, cacheHit, windowMonths;
-  if (cachedEntry && Date.now() - cachedEntry.fetchedAt < maxAgeMs) {
+  const cacheIsFresh = !!cachedEntry && Date.now() - cachedEntry.fetchedAt < maxAgeMs;
+
+  let raw, windowMonths;
+  let firedBeforeFetch = false;
+  const fireBeforeFetchOnce = () => { if (!firedBeforeFetch) { firedBeforeFetch = true; opts.onBeforeFetch?.(); } };
+
+  if (cacheIsFresh) {
     raw = cachedEntry.data;
-    fetchedAt = cachedEntry.fetchedAt;
-    cacheHit = true;
-    // windowMonths rides along inside the cached data itself (see below) —
-    // ?? 1 covers a cache entry written before this field existed.
+    // windowMonths rides along inside the cached data itself — ?? 1 covers
+    // a cache entry written before this field existed.
     windowMonths = raw.windowMonths ?? 1;
   } else {
-    opts.onBeforeFetch?.();
-
-    let perMonth = await fetchMonths(queryParams, uciPath, monthsBack, 1, token, opts);
+    fireBeforeFetchOnce();
+    raw = mergeMovesData(await fetchMonths(queryParams, uciPath, monthsBack, 1, token, opts));
     windowMonths = 1;
-    raw = mergeMovesData(perMonth);
-
-    if (LEAF_REASONS_NEEDING_MORE_HISTORY.has(computeNodeFromRaw(raw, color, uciPath.length, settings).leafReason)) {
-      perMonth = perMonth.concat(await fetchMonths(queryParams, uciPath, monthsBack + 1, YEAR_TIER_MONTHS - 1, token, opts));
-      windowMonths = YEAR_TIER_MONTHS;
-      raw = mergeMovesData(perMonth);
-
-      if (LEAF_REASONS_NEEDING_MORE_HISTORY.has(computeNodeFromRaw(raw, color, uciPath.length, settings).leafReason)) {
-        windowMonths = FULL_HISTORY;
-        raw = mergeMovesData(await fetchFullHistory(queryParams, uciPath, token, opts));
-      }
-    }
-
-    raw = { ...raw, windowMonths };
-    await cache.putCached(key, raw);
-    fetchedAt = Date.now();
-    cacheHit = false;
   }
+
+  const escalation = await escalateIfNeeded(raw, windowMonths, {
+    queryParams, uciPath, monthsBack, color, settings, token, opts, onEscalating: fireBeforeFetchOnce,
+  });
+  raw = escalation.raw;
+  windowMonths = escalation.windowMonths;
+
+  // A cache hit that needed escalating did real network work, so it isn't
+  // really a "hit" anymore in the sense callers care about (whether a
+  // fetch happened) — and either way, freshly-grown data is worth writing
+  // back so the next read doesn't have to redo it.
+  const cacheHit = cacheIsFresh && !escalation.escalated;
+  const fetchedAt = cacheHit ? cachedEntry.fetchedAt : Date.now();
+  if (!cacheHit) await cache.putCached(key, { ...raw, windowMonths });
 
   const node = computeNodeFromRaw(raw, color, uciPath.length, settings);
   const totalGames = raw.moves.reduce((s, m) => s + (m.white || 0) + (m.draws || 0) + (m.black || 0), 0);
