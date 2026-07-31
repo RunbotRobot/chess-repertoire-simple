@@ -349,19 +349,22 @@ const MS_PER_MONTH = 30.44 * 24 * 60 * 60 * 1000;
 // for the (rare) obscure position that ends up needing the wider tiers, in
 // keeping with the whole lazy-fetch design's goal of minimizing server
 // strain over raw speed.
-async function fetchMonths(queryParams, uciPath, monthsBack, count, token, opts) {
+async function fetchMonths(queryParams, uciPath, monthsBack, count, token, opts, tick) {
   const perMonth = [];
   for (let i = 0; i < count; i++) {
     const monthToFetch = monthString(-(monthsBack + i));
     const url = buildExplorerUrl({ ...queryParams, since: monthToFetch, until: monthToFetch, play: uciPath.join(',') });
     perMonth.push(await fetchExplorerRaw(url, { signal: opts.signal, token }));
+    tick?.();
   }
   return perMonth;
 }
 
-async function fetchFullHistory(queryParams, uciPath, token, opts) {
+async function fetchFullHistory(queryParams, uciPath, token, opts, tick) {
   const url = buildExplorerUrl({ ...queryParams, play: uciPath.join(',') }); // no since/until at all
-  return [await fetchExplorerRaw(url, { signal: opts.signal, token })];
+  const result = [await fetchExplorerRaw(url, { signal: opts.signal, token })];
+  tick?.();
+  return result;
 }
 
 // Given a position's data at whatever tier it's currently at (1 month, 12
@@ -375,20 +378,22 @@ async function fetchFullHistory(queryParams, uciPath, token, opts) {
 // (windowMonths is always exactly 1, YEAR_TIER_MONTHS, or FULL_HISTORY
 // here — those are the only values getPosition ever writes back out, so
 // there's no intermediate case to handle.)
-async function escalateIfNeeded(raw, windowMonths, { queryParams, uciPath, monthsBack, color, settings, token, opts, onEscalating }) {
+async function escalateIfNeeded(raw, windowMonths, { queryParams, uciPath, monthsBack, color, settings, token, opts, onEscalating, tick, bumpTotal }) {
   let escalated = false;
   const isLeafForLackOfData = (r) => LEAF_REASONS_NEEDING_MORE_HISTORY.has(computeNodeFromRaw(r, color, uciPath.length, settings).leafReason);
 
   if (windowMonths === 1 && isLeafForLackOfData(raw)) {
     onEscalating();
-    const rest = await fetchMonths(queryParams, uciPath, monthsBack + 1, YEAR_TIER_MONTHS - 1, token, opts);
+    bumpTotal(YEAR_TIER_MONTHS - 1); // about to make this many more requests
+    const rest = await fetchMonths(queryParams, uciPath, monthsBack + 1, YEAR_TIER_MONTHS - 1, token, opts, tick);
     raw = mergeMovesData([raw, ...rest]);
     windowMonths = YEAR_TIER_MONTHS;
     escalated = true;
   }
   if (windowMonths === YEAR_TIER_MONTHS && isLeafForLackOfData(raw)) {
     onEscalating();
-    raw = mergeMovesData(await fetchFullHistory(queryParams, uciPath, token, opts));
+    bumpTotal(1);
+    raw = mergeMovesData(await fetchFullHistory(queryParams, uciPath, token, opts, tick));
     windowMonths = FULL_HISTORY;
     escalated = true;
   }
@@ -426,12 +431,17 @@ async function escalateIfNeeded(raw, windowMonths, { queryParams, uciPath, month
  * @param {string[]} uciPath moves from the start position, in UCI form
  * @param {'white'|'black'} color which repertoire this is for
  * @param {object} settings
- * @param {{signal?: AbortSignal, onBeforeFetch?: () => void, cache?: {getCached, putCached}}} opts
+ * @param {{signal?: AbortSignal, onBeforeFetch?: () => void, onFetchProgress?: ({completed:number,total:number}) => void, cache?: {getCached, putCached}}} opts
  *   onBeforeFetch fires synchronously, only when a real network request is
  *   about to happen — including when a cache hit turns out to need
- *   escalating — the hook for "hold on, fetching…" UX. cache defaults to
- *   the real IndexedDB-backed one; tests inject a fake in-memory
- *   implementation instead.
+ *   escalating — the hook for "hold on, fetching…" UX. onFetchProgress
+ *   fires after each individual request completes, `total` starting at 1
+ *   (the common case: just the tier-1 request) and growing to 12 or 13 if
+ *   escalation actually kicks in — for a progress bar that reflects
+ *   however many requests THIS lookup ends up actually needing, not a
+ *   fixed worst-case estimate. Never fires on a pure cache hit. cache
+ *   defaults to the real IndexedDB-backed one; tests inject a fake
+ *   in-memory implementation instead.
  */
 export async function getPosition(uciPath, color, settings, opts = {}) {
   const cache = opts.cache || { getCached, putCached };
@@ -453,6 +463,10 @@ export async function getPosition(uciPath, color, settings, opts = {}) {
   let firedBeforeFetch = false;
   const fireBeforeFetchOnce = () => { if (!firedBeforeFetch) { firedBeforeFetch = true; opts.onBeforeFetch?.(); } };
 
+  const progress = { completed: 0, total: 1 };
+  const tick = () => { progress.completed++; opts.onFetchProgress?.({ completed: progress.completed, total: progress.total }); };
+  const bumpTotal = (delta) => { progress.total += delta; opts.onFetchProgress?.({ completed: progress.completed, total: progress.total }); };
+
   if (cacheIsFresh) {
     raw = cachedEntry.data;
     // windowMonths rides along inside the cached data itself — ?? 1 covers
@@ -460,12 +474,12 @@ export async function getPosition(uciPath, color, settings, opts = {}) {
     windowMonths = raw.windowMonths ?? 1;
   } else {
     fireBeforeFetchOnce();
-    raw = mergeMovesData(await fetchMonths(queryParams, uciPath, monthsBack, 1, token, opts));
+    raw = mergeMovesData(await fetchMonths(queryParams, uciPath, monthsBack, 1, token, opts, tick));
     windowMonths = 1;
   }
 
   const escalation = await escalateIfNeeded(raw, windowMonths, {
-    queryParams, uciPath, monthsBack, color, settings, token, opts, onEscalating: fireBeforeFetchOnce,
+    queryParams, uciPath, monthsBack, color, settings, token, opts, onEscalating: fireBeforeFetchOnce, tick, bumpTotal,
   });
   raw = escalation.raw;
   windowMonths = escalation.windowMonths;

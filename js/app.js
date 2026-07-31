@@ -14,7 +14,7 @@ import { Chess } from './vendor/chess.esm.js';
 // devtools is actually running the latest code, and it also drives the
 // service worker's cache name (see sw.js) so updates actually take effect
 // instead of being served stale from the offline cache.
-export const APP_VERSION = 37;
+export const APP_VERSION = 38;
 
 const COLOR_OPTIONS = ['white', 'black'];
 const RATING_OPTIONS = ['1000', '1200', '1400', '1600', '1800', '2000', '2200', '2500'];
@@ -632,12 +632,39 @@ async function enterQuiz() {
 
 // Positions are fetched lazily, straight from Lichess, as the quiz reaches
 // them — there's no pre-built repertoire to check for existence up front
-// any more, just whether we're able to talk to Lichess at all.
-function makeGetNode(color, onFetching) {
+// any more, just whether we're able to talk to Lichess at all. A lazy
+// lookup can mean anywhere from 1 to 13 sequential requests (see
+// explorer.js's header comment on the 1mo/12mo/all-time escalation), so
+// onFetchProgress carries {completed, total} for a progress bar — total
+// starts at 1 and grows as escalation actually happens, rather than
+// assuming the worst case up front.
+function makeGetNode(color, { onBeforeFetch, onFetchProgress }) {
   return async (uciPath) => {
-    const { node } = await getPosition(uciPath, color, settings, { onBeforeFetch: onFetching });
+    const { node } = await getPosition(uciPath, color, settings, { onBeforeFetch, onFetchProgress });
     return node;
   };
+}
+
+// Shared by both quiz UIs: a fetch-progress bar identified by an id prefix
+// ('manual-fetch-progress' or 'quiz-fetch-progress', each with a matching
+// '-track' wrapper element). Shown when a real network fetch starts, hidden
+// again as soon as the resulting position is actually in hand (i.e. at the
+// top of whichever handler receives it next), so it never lingers once
+// there's real content to show instead.
+function showFetchProgress(prefix) {
+  const track = $(`#${prefix}-track`);
+  if (!track) return;
+  track.style.display = 'block';
+  $(`#${prefix}`).style.width = '0%';
+}
+function updateFetchProgress(prefix, { completed, total }) {
+  const fill = $(`#${prefix}`);
+  if (!fill) return;
+  fill.style.width = `${Math.min(100, Math.round((completed / total) * 100))}%`;
+}
+function hideFetchProgress(prefix) {
+  const track = $(`#${prefix}-track`);
+  if (track) track.style.display = 'none';
 }
 
 $('#start-quiz').addEventListener('click', async () => {
@@ -687,12 +714,14 @@ async function startVoiceQuiz(quizMode) {
       if (quizMode === 'both') await speakGuarded(color === 'white' ? 'White.' : 'Black.');
     },
     onOpponentMove: async ({ san, fen }) => {
+      hideFetchProgress('quiz-fetch-progress');
       currentFen = fen;
       recordLineMove(san);
       log(`Opponent plays ${san}`);
       await speakGuarded(`They play ${sanSpoken(san)}.`);
     },
     onAwaitingUserMove: ({ fen, legalMoves }) => {
+      hideFetchProgress('quiz-fetch-progress');
       currentFen = fen;
       pendingLegalMoves = legalMoves;
       return new Promise((resolve) => {
@@ -711,6 +740,7 @@ async function startVoiceQuiz(quizMode) {
       await waitForVoiceContinue();
     },
     onLineEnd: async ({ missed, leafGames, leafReason, leafWindowInfo }) => {
+      hideFetchProgress('quiz-fetch-progress');
       if (missed) return;
       // The window/next-fetch detail is logged (visible in the debug log
       // panel) rather than spoken — useful for troubleshooting without
@@ -737,13 +767,15 @@ async function startVoiceQuiz(quizMode) {
 
   const onFetching = () => {
     log('Fetching next position from Lichess…');
+    showFetchProgress('quiz-fetch-progress');
     speakGuarded('One moment.');
   };
+  const onFetchProgress = (p) => updateFetchProgress('quiz-fetch-progress', p);
 
   try {
     while (quizRunning) {
       const color = quizMode === 'both' ? (Math.random() < 0.5 ? 'white' : 'black') : quizMode;
-      const session = new QuizSession({ getNode: makeGetNode(color, onFetching), settings, color, handlers });
+      const session = new QuizSession({ getNode: makeGetNode(color, { onBeforeFetch: onFetching, onFetchProgress }), settings, color, handlers });
       await session.playNextLine();
     }
   } catch (err) {
@@ -767,6 +799,7 @@ $('#stop-quiz').addEventListener('click', async () => {
   pauseListening();
   quizLive.classList.remove('active', 'blackout', 'peek');
   await wakelock.disableBlackout(quizLive);
+  hideFetchProgress('quiz-fetch-progress');
   mode = 'idle';
   log('Quiz stopped.');
 });
@@ -859,6 +892,7 @@ async function startManualQuiz(quizMode) {
       $('#manual-status').textContent = quizMode === 'both' ? `New line — ${cap(color)} to move first.` : 'New line.';
     },
     onOpponentMove: async ({ san, uci, fen, games, share, opponentMoves }) => {
+      hideFetchProgress('manual-fetch-progress');
       manualCurrentFen = fen;
       manualLegalMoves = [];
       manualSelectedSquare = null;
@@ -868,6 +902,7 @@ async function startManualQuiz(quizMode) {
       $('#manual-status').textContent = `Opponent played ${san}. Your move.`;
     },
     onAwaitingUserMove: ({ fen, legalMoves }) => {
+      hideFetchProgress('manual-fetch-progress');
       manualCurrentFen = fen;
       manualLegalMoves = legalMoves;
       manualSelectedSquare = null;
@@ -909,6 +944,7 @@ async function startManualQuiz(quizMode) {
       await waitForManualContinue();
     },
     onLineEnd: async ({ missed, leafGames, leafReason, leafWindowInfo }) => {
+      hideFetchProgress('manual-fetch-progress');
       if (missed) return;
       renderManualBoard(manualCurrentFen, null); // the line is done — clear the last-move highlight rather than leaving it up through the whole pause
       const debugText = windowInfoDebugText(leafWindowInfo);
@@ -929,12 +965,16 @@ async function startManualQuiz(quizMode) {
     },
   };
 
-  const onFetching = () => { $('#manual-status').textContent = 'Fetching from Lichess…'; };
+  const onFetching = () => {
+    $('#manual-status').textContent = 'Fetching from Lichess…';
+    showFetchProgress('manual-fetch-progress');
+  };
+  const onFetchProgress = (p) => updateFetchProgress('manual-fetch-progress', p);
 
   try {
     while (manualRunning) {
       const color = quizMode === 'both' ? (Math.random() < 0.5 ? 'white' : 'black') : quizMode;
-      const session = new QuizSession({ getNode: makeGetNode(color, onFetching), settings, color, handlers });
+      const session = new QuizSession({ getNode: makeGetNode(color, { onBeforeFetch: onFetching, onFetchProgress }), settings, color, handlers });
       await session.playNextLine();
     }
   } catch (err) {

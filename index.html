@@ -95,6 +95,11 @@
   .debug-log{background:#0a0c10;border:1px solid var(--line);border-radius:6px;padding:8px;
     font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;color:#9aa4b8;
     max-height:220px;overflow-y:auto;white-space:pre-wrap;}
+
+  .progress-track{background:var(--panel-2);border:1px solid var(--line);border-radius:999px;
+    height:6px;overflow:hidden;margin-top:8px;}
+  .progress-fill{background:var(--accent);height:100%;width:0%;transition:width .25s ease;}
+  #quiz-live .progress-track{width:200px;max-width:70vw;background:#1a1d24;border-color:#2a2f38;}
   .voice-support-warn{font-size:12px;color:var(--warn);margin-top:6px;}
   .replay-badge{display:inline-block;font-size:11px;font-weight:600;text-transform:none;letter-spacing:normal;
     background:var(--warn);color:#2a1f00;border-radius:999px;padding:3px 10px;margin-left:8px;vertical-align:middle;}
@@ -262,6 +267,7 @@
         <h3>Quiz <span id="manual-replay-badge" class="replay-badge" style="display:none;">↻ Replay (memorization)</span></h3>
         <div id="manual-board-wrap" style="max-width:320px;margin:0 auto 10px;"></div>
         <div class="hint" id="manual-status">—</div>
+        <div class="progress-track" id="manual-fetch-progress-track" style="display:none;"><div class="progress-fill" id="manual-fetch-progress"></div></div>
         <div class="btn-row" style="margin-top:10px;">
           <button class="btn btn-block" id="manual-continue-btn" style="display:none;">Continue</button>
         </div>
@@ -314,6 +320,7 @@
 <div id="quiz-live">
   <div class="mode-label" id="quiz-mode-label">Quiz</div>
   <div class="caption" id="quiz-caption">Listening…</div>
+  <div class="progress-track" id="quiz-fetch-progress-track" style="display:none;"><div class="progress-fill" id="quiz-fetch-progress"></div></div>
   <div class="exit-hint">tap to peek · press stop below to end</div>
   <button class="btn secondary" id="copy-pgn-quiz-live" style="position:absolute;bottom:96px;">Copy PGN</button>
   <button class="btn danger" id="stop-quiz" style="position:absolute;bottom:44px;">Stop quiz</button>
