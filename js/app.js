@@ -14,7 +14,7 @@ import { Chess } from './vendor/chess.esm.js';
 // devtools is actually running the latest code, and it also drives the
 // service worker's cache name (see sw.js) so updates actually take effect
 // instead of being served stale from the offline cache.
-export const APP_VERSION = 38;
+export const APP_VERSION = 39;
 
 const COLOR_OPTIONS = ['white', 'black'];
 const RATING_OPTIONS = ['1000', '1200', '1400', '1600', '1800', '2000', '2200', '2500'];
@@ -939,6 +939,13 @@ async function startManualQuiz(quizMode) {
       const corrected = new Chess(fen);
       corrected.move({ from: lastMove.from, to: lastMove.to, promotion: correctUci.length > 4 ? correctUci[4] : undefined });
       manualCurrentFen = corrected.fen();
+      // The reveal itself already shows this position's answer, so there's
+      // no more "cheating" concern in also advancing the history panel to
+      // it — otherwise it'd be stuck one position behind the correction on
+      // screen, still showing stats for a move that's now two moves back.
+      // Deliberately NOT recordLineMove()'d into the PGN, though: a missed
+      // guess never actually happened in the line the way a real move did.
+      pushLineHistory({ mover: 'me', san: correctSan, games, score, siblings: alternates });
       renderManualBoard(manualCurrentFen, lastMove);
       $('#manual-status').textContent = `Not quite — the move was ${correctSan}. Tap Continue when ready.`;
       await waitForManualContinue();
