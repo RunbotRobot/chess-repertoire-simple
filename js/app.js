@@ -14,7 +14,7 @@ import { Chess } from './vendor/chess.esm.js';
 // devtools is actually running the latest code, and it also drives the
 // service worker's cache name (see sw.js) so updates actually take effect
 // instead of being served stale from the offline cache.
-export const APP_VERSION = 35;
+export const APP_VERSION = 36;
 
 const COLOR_OPTIONS = ['white', 'black'];
 const RATING_OPTIONS = ['1000', '1200', '1400', '1600', '1800', '2000', '2200', '2500'];
@@ -40,33 +40,46 @@ function log(msg) {
   if (caption) caption.textContent = msg;
 }
 
-async function copyLog(button) {
-  const fullText = logEntries.join('\n');
+async function copyTextToClipboard(text) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+  // Fallback for contexts without the async Clipboard API.
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.style.position = 'fixed';
+  ta.style.opacity = '0';
+  document.body.appendChild(ta);
+  ta.select();
+  document.execCommand('copy');
+  document.body.removeChild(ta);
+}
+
+// Shared button-feedback pattern for every "Copy X" button: swap the label
+// to confirm success/failure, then restore it — buttons pass their own
+// text-producing function so a genuinely empty result (e.g. no PGN yet)
+// can say so instead of silently copying nothing.
+async function copyButtonText(button, getText, emptyMessage) {
   const original = button.textContent;
+  const text = getText();
+  if (!text) {
+    button.textContent = emptyMessage;
+    setTimeout(() => { button.textContent = original; }, 1500);
+    return;
+  }
   try {
-    if (navigator.clipboard?.writeText) {
-      await navigator.clipboard.writeText(fullText);
-    } else {
-      // Fallback for contexts without the async Clipboard API.
-      const ta = document.createElement('textarea');
-      ta.value = fullText;
-      ta.style.position = 'fixed';
-      ta.style.opacity = '0';
-      document.body.appendChild(ta);
-      ta.select();
-      document.execCommand('copy');
-      document.body.removeChild(ta);
-    }
+    await copyTextToClipboard(text);
     button.textContent = 'Copied!';
   } catch (err) {
     button.textContent = 'Copy failed';
-    console.error('copy log failed', err);
+    console.error('copy failed', err);
   }
   setTimeout(() => { button.textContent = original; }, 1500);
 }
 
 for (const id of ['#copy-log-quiz', '#copy-log-setup']) {
-  $(id)?.addEventListener('click', (e) => copyLog(e.currentTarget));
+  $(id)?.addEventListener('click', (e) => copyButtonText(e.currentTarget, () => logEntries.join('\n'), 'Nothing to copy'));
 }
 
 // ---------- nav ----------
@@ -427,6 +440,30 @@ let engine = null;
 let analysisSession = null;
 let quizRunning = false;
 
+// Mirrors the current quiz line's actual moves (voice and manual modes
+// share this — only one runs a session at a time) purely so its PGN can be
+// copied out for analysis in another app. Reset at the start of every
+// fresh line and every memorization replay; a wrong guess is deliberately
+// never applied here, since it was never actually part of the line.
+let currentLineChess = new Chess();
+function resetCurrentLinePgn() { currentLineChess = new Chess(); }
+function recordLineMove(san) { currentLineChess.move(san); }
+
+// Bare movetext ("1. e4 e5 2. Nf3 ...") rather than chess.js's own pgn(),
+// which always includes a block of placeholder headers ([Event "?"] etc.)
+// even with zero moves played — clutter for what's meant to be a quick
+// paste into another analysis tool, and it'd also make an empty line
+// impossible to detect (pgn() is never falsy, even with no moves).
+function currentLineMovetext() {
+  const moves = currentLineChess.history();
+  if (moves.length === 0) return '';
+  return moves.map((san, i) => (i % 2 === 0 ? `${i / 2 + 1}. ${san}` : san)).join(' ');
+}
+
+for (const id of ['#manual-copy-pgn-btn', '#copy-pgn-quiz-live']) {
+  $(id)?.addEventListener('click', (e) => copyButtonText(e.currentTarget, currentLineMovetext, 'No moves yet'));
+}
+
 quizLive.addEventListener('click', () => {
   quizLive.classList.add('peek');
   clearTimeout(quizLive._peekTimer);
@@ -578,10 +615,12 @@ async function startVoiceQuiz(quizMode) {
 
   const handlers = {
     onLineStart: async ({ color }) => {
+      resetCurrentLinePgn();
       if (quizMode === 'both') await speakGuarded(color === 'white' ? 'White.' : 'Black.');
     },
     onOpponentMove: async ({ san, fen }) => {
       currentFen = fen;
+      recordLineMove(san);
       log(`Opponent plays ${san}`);
       await speakGuarded(`They play ${sanSpoken(san)}.`);
     },
@@ -595,6 +634,7 @@ async function startVoiceQuiz(quizMode) {
     },
     onResult: async ({ correct, correctSan }) => {
       if (correct) {
+        recordLineMove(correctSan);
         log(`Correct: ${correctSan}`);
         return;
       }
@@ -614,6 +654,7 @@ async function startVoiceQuiz(quizMode) {
     },
     onReplayStart: async () => {
       inReplay = true;
+      resetCurrentLinePgn();
       quizModeLabel.textContent = 'Replay';
       await speakGuarded("Let's run through that line again.");
     },
@@ -740,6 +781,7 @@ async function startManualQuiz(quizMode) {
 
   const handlers = {
     onLineStart: async ({ color }) => {
+      resetCurrentLinePgn();
       manualOrientation = color;
       manualLegalMoves = [];
       manualSelectedSquare = null;
@@ -750,6 +792,7 @@ async function startManualQuiz(quizMode) {
       manualCurrentFen = fen;
       manualLegalMoves = [];
       manualSelectedSquare = null;
+      recordLineMove(san);
       renderManualBoard(fen, { from: uci.slice(0, 2), to: uci.slice(2, 4) });
       $('#manual-status').textContent = `Opponent played ${san}. Your move.`;
     },
@@ -775,6 +818,7 @@ async function startManualQuiz(quizMode) {
       const lastMove = { from: correctUci.slice(0, 2), to: correctUci.slice(2, 4) };
       if (correct) {
         manualCurrentFen = fen;
+        recordLineMove(correctSan);
         renderManualBoard(fen, lastMove);
         $('#manual-status').textContent = `Correct — ${correctSan}.`;
         return;
@@ -801,6 +845,7 @@ async function startManualQuiz(quizMode) {
     },
     onReplayStart: async () => {
       manualLastMove = null; // clear the previous attempt's correction highlight before the replay's own first move renders
+      resetCurrentLinePgn();
       $('#manual-replay-badge').style.display = 'inline-block';
       $('#manual-status').textContent = "Replaying that line for memorization…";
     },
