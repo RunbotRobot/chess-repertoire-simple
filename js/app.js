@@ -14,7 +14,7 @@ import { Chess } from './vendor/chess.esm.js';
 // devtools is actually running the latest code, and it also drives the
 // service worker's cache name (see sw.js) so updates actually take effect
 // instead of being served stale from the offline cache.
-export const APP_VERSION = 36;
+export const APP_VERSION = 37;
 
 const COLOR_OPTIONS = ['white', 'black'];
 const RATING_OPTIONS = ['1000', '1200', '1400', '1600', '1800', '2000', '2200', '2500'];
@@ -464,6 +464,74 @@ for (const id of ['#manual-copy-pgn-btn', '#copy-pgn-quiz-live']) {
   $(id)?.addEventListener('click', (e) => copyButtonText(e.currentTarget, currentLineMovetext, 'No moves yet'));
 }
 
+// Manual-mode-only: a record of each move actually played in the current
+// line, along with the win rate / alternates (mine) or share / other
+// replies (opponent's) that were live at the moment it was chosen — shown
+// on the quiz screen for the *previous* move only (never the position
+// currently being quizzed, which would just be showing the answer), with
+// buttons to step back through earlier moves in the same line. Scoped to
+// manual mode: this is a "look, don't tell" screen feature, and voice mode
+// is meant to run screen-off, so there's no natural place for it there.
+let lineHistory = [];
+let historyViewIndex = -1;
+
+function resetLineHistory() {
+  lineHistory = [];
+  historyViewIndex = -1;
+  renderManualHistoryPanel();
+}
+
+function pushLineHistory(entry) {
+  lineHistory.push(entry);
+  historyViewIndex = lineHistory.length - 1; // jump to the move just played
+  renderManualHistoryPanel();
+}
+
+function renderManualHistoryPanel() {
+  const panel = $('#manual-history-panel');
+  if (!panel) return;
+  if (lineHistory.length === 0) { panel.style.display = 'none'; return; }
+  panel.style.display = 'block';
+
+  const entry = lineHistory[historyViewIndex];
+  $('#manual-history-back').disabled = historyViewIndex <= 0;
+  $('#manual-history-fwd').disabled = historyViewIndex >= lineHistory.length - 1;
+  $('#manual-history-position').textContent = `${historyViewIndex + 1} / ${lineHistory.length}`;
+
+  const list = $('#manual-history-list');
+  list.innerHTML = '';
+
+  const headEl = document.createElement('div');
+  headEl.className = 'movebtn mine';
+  headEl.innerHTML = entry.mover === 'me'
+    ? `<span>You played ${entry.san}</span><span class="pct">${entry.games} games, ${(entry.score * 100).toFixed(0)}% win rate</span>`
+    : `<span>Opponent played ${entry.san}</span><span class="pct">${entry.games} games, ${(entry.share * 100).toFixed(0)}% of replies</span>`;
+  list.appendChild(headEl);
+
+  if (entry.siblings.length > 0) {
+    const label = document.createElement('div');
+    label.className = 'hint';
+    label.style.marginTop = '8px';
+    label.textContent = entry.mover === 'me' ? 'Other candidates:' : 'Other replies:';
+    list.appendChild(label);
+    for (const alt of entry.siblings) {
+      const altEl = document.createElement('div');
+      altEl.className = 'movebtn alt';
+      altEl.innerHTML = entry.mover === 'me'
+        ? `<span>${alt.san}</span><span class="pct">${alt.games} games, ${(alt.score * 100).toFixed(0)}% score</span>`
+        : `<span>${alt.san}</span><span class="pct">${alt.games} games, ${(alt.share * 100).toFixed(0)}%</span>`;
+      list.appendChild(altEl);
+    }
+  }
+}
+
+$('#manual-history-back')?.addEventListener('click', () => {
+  if (historyViewIndex > 0) { historyViewIndex--; renderManualHistoryPanel(); }
+});
+$('#manual-history-fwd')?.addEventListener('click', () => {
+  if (historyViewIndex < lineHistory.length - 1) { historyViewIndex++; renderManualHistoryPanel(); }
+});
+
 quizLive.addEventListener('click', () => {
   quizLive.classList.add('peek');
   clearTimeout(quizLive._peekTimer);
@@ -775,6 +843,7 @@ async function startManualQuiz(quizMode) {
   $('#manual-replay-badge').style.display = 'none';
   $('#manual-continue-btn').style.display = 'none';
   $('#manual-status').textContent = 'Starting…';
+  resetLineHistory();
   engine = engine || new Engine();
   if (!analysisSession) analysisSession = new AnalysisSession(engine);
   engine.init().catch((err) => log(`Engine init failed (analysis will be unavailable): ${err.message}`));
@@ -782,17 +851,19 @@ async function startManualQuiz(quizMode) {
   const handlers = {
     onLineStart: async ({ color }) => {
       resetCurrentLinePgn();
+      resetLineHistory();
       manualOrientation = color;
       manualLegalMoves = [];
       manualSelectedSquare = null;
       manualLastMove = null;
       $('#manual-status').textContent = quizMode === 'both' ? `New line — ${cap(color)} to move first.` : 'New line.';
     },
-    onOpponentMove: async ({ san, uci, fen }) => {
+    onOpponentMove: async ({ san, uci, fen, games, share, opponentMoves }) => {
       manualCurrentFen = fen;
       manualLegalMoves = [];
       manualSelectedSquare = null;
       recordLineMove(san);
+      pushLineHistory({ mover: 'opponent', san, games, share, siblings: opponentMoves.filter((m) => m.uci !== uci) });
       renderManualBoard(fen, { from: uci.slice(0, 2), to: uci.slice(2, 4) });
       $('#manual-status').textContent = `Opponent played ${san}. Your move.`;
     },
@@ -812,13 +883,14 @@ async function startManualQuiz(quizMode) {
         if (!manualRunning) resolve(ABORT);
       });
     },
-    onResult: async ({ correct, correctSan, correctUci, fen }) => {
+    onResult: async ({ correct, correctSan, correctUci, fen, games, score, alternates }) => {
       manualLegalMoves = [];
       manualSelectedSquare = null;
       const lastMove = { from: correctUci.slice(0, 2), to: correctUci.slice(2, 4) };
       if (correct) {
         manualCurrentFen = fen;
         recordLineMove(correctSan);
+        pushLineHistory({ mover: 'me', san: correctSan, games, score, siblings: alternates });
         renderManualBoard(fen, lastMove);
         $('#manual-status').textContent = `Correct — ${correctSan}.`;
         return;
@@ -846,6 +918,7 @@ async function startManualQuiz(quizMode) {
     onReplayStart: async () => {
       manualLastMove = null; // clear the previous attempt's correction highlight before the replay's own first move renders
       resetCurrentLinePgn();
+      resetLineHistory();
       $('#manual-replay-badge').style.display = 'inline-block';
       $('#manual-status').textContent = "Replaying that line for memorization…";
     },

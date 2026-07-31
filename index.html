@@ -266,6 +266,16 @@
           <button class="btn btn-block" id="manual-continue-btn" style="display:none;">Continue</button>
         </div>
 
+        <div id="manual-history-panel" style="display:none;margin-top:10px;padding-top:10px;border-top:1px solid var(--line);">
+          <div class="row" style="justify-content:space-between;align-items:center;margin-bottom:8px;">
+            <button class="btn secondary" id="manual-history-back" style="padding:5px 12px;">◀ Prev</button>
+            <span class="hint" id="manual-history-position" style="margin:0;">—</span>
+            <button class="btn secondary" id="manual-history-fwd" style="padding:5px 12px;">Next ▶</button>
+          </div>
+          <div class="hint" style="margin-bottom:4px;">Stats for the move already played — never the one you're being asked for.</div>
+          <div class="movelist" id="manual-history-list"></div>
+        </div>
+
         <div id="manual-analysis-panel" style="display:none;margin-top:10px;padding-top:10px;border-top:1px solid var(--line);">
           <div class="row">
             <button class="btn secondary" data-q="best">Best move</button>

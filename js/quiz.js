@@ -63,7 +63,10 @@ export class QuizSession {
         const moveResult = applyUci(chess, chosen.uci);
         if (!moveResult) break; // shouldn't happen; defends against bad data from the API
         attemptPath.push({ uci: chosen.uci, san: chosen.san, mover: 'opponent' });
-        await this.handlers.onOpponentMove?.({ san: chosen.san, uci: chosen.uci, fen: chess.fen() });
+        await this.handlers.onOpponentMove?.({
+          san: chosen.san, uci: chosen.uci, fen: chess.fen(),
+          games: chosen.games, share: chosen.share, opponentMoves: node.opponentMoves,
+        });
         uciPath.push(chosen.uci);
         node = await this.getNode(uciPath);
         idx++;
@@ -87,6 +90,9 @@ export class QuizSession {
         correctUci: node.myMove.uci,
         userSan,
         fen: chess.fen(), // post-move fen when correct; unchanged (pre-move) fen on a miss
+        games: node.myMove.games,
+        score: node.myMove.score,
+        alternates: node.alternates,
       });
 
       if (!correct) {
@@ -148,17 +154,31 @@ handlers shape:
   onLineStart({color}) -> Promise<void>                fires once, before a fresh line begins (not before a
                                                         memorization replay); useful to announce the color
                                                         when quizzing "both" repertoires in one session
-  onOpponentMove({san, uci, fen}) -> Promise<void>    announce the opponent's move (voice) or render it
+  onOpponentMove({san, uci, fen, games, share, opponentMoves}) -> Promise<void>
+                                                        announce the opponent's move (voice) or render it
                                                         (board/text), resolve when done. fen is the position
                                                         after this move; uci is handy for board highlighting.
+                                                        games/share are this specific reply's own stats;
+                                                        opponentMoves is the full kept-reply list at the position
+                                                        it was chosen from (including this one) — for a UI that
+                                                        shows "what else could they have played," which must stay
+                                                        about the move that was *just* played, one step behind
+                                                        whatever's currently being quizzed, or it'd give the
+                                                        answer away.
   onAwaitingUserMove({fen, legalMoves, correctSan}) -> Promise<string san>
                                                         collect the user's move (voice or on-screen), resolve
                                                         with the SAN it matched (or a value that won't match
                                                         correctSan, e.g. '', on timeout/giveup)
-  onResult({correct, correctSan, correctUci, userSan, fen}) -> Promise<void>
+  onResult({correct, correctSan, correctUci, userSan, fen, games, score, alternates}) -> Promise<void>
                                                         confirm / reveal the correct move. fen reflects the
                                                         position after the move when correct, or is unchanged
                                                         (pre-move) on a miss, so a board can be kept in sync.
+                                                        games/score/alternates describe the move just answered
+                                                        (score is the win rate that made it the repertoire pick,
+                                                        alternates the other candidates) — meaningful only when
+                                                        correct, same reasoning as onOpponentMove's stats: this is
+                                                        about the move that just resolved, not the one now being
+                                                        asked about.
   onLineEnd({missed, attemptPath, leafGames, leafReason, leafWindowInfo}) -> Promise<void>
                                                         fires once per line (fresh or replay). leafReason (see
                                                         explorer.js's computeNodeFromRaw doc) explains *why* the
