@@ -127,6 +127,37 @@ export function positionKey(fen) {
  *   children: Map<san, {san, uci, key}> }
  */
 export function buildPositionGraph(games, opts = {}) {
+  const builder = createGraphBuilder(opts);
+  for (const game of games) builder.feedGame(game);
+  return builder.finish();
+}
+
+/**
+ * Async twin of buildPositionGraph, for a games source that can only be
+ * consumed incrementally (a streaming PGN parser reading a multi-GB dump
+ * that must never be fully buffered in memory — see ingest.js's
+ * parsePgnGamesStream). Shares the exact same builder/scoring semantics;
+ * the only difference is `games` may be an async iterable (anything usable
+ * with `for await`), not just a plain array.
+ *
+ * @param {AsyncIterable<{id: string, result: 'white'|'black'|'draw', moves: string[]}>|Array} games
+ * @param {{maxPlies?: number, minGames?: number}} [opts]
+ * @returns {Promise<Map<string, PositionNode>>}
+ */
+export async function buildPositionGraphAsync(games, opts = {}) {
+  const builder = createGraphBuilder(opts);
+  for await (const game of games) builder.feedGame(game);
+  return builder.finish();
+}
+
+// The shared engine behind both buildPositionGraph and
+// buildPositionGraphAsync — see buildPositionGraph's own doc comment above
+// for the full design rationale (lazy hot-branch expansion, the two-phase
+// cheap/expensive split, the work queue, the invariant). Takes games one
+// at a time via feedGame() so the caller controls whether the source is a
+// plain array (consumed with a sync for-loop) or an async stream (consumed
+// with for-await) without duplicating any of this logic.
+function createGraphBuilder(opts) {
   const maxPlies = Number.isFinite(opts.maxPlies) ? opts.maxPlies : Infinity;
   const minGames = Number.isFinite(opts.minGames) ? opts.minGames : 10;
   const nodes = new Map();
@@ -300,8 +331,10 @@ export function buildPositionGraph(games, opts = {}) {
     // real in-game repetition let a record look like it was resolving
     // toward its own currently-parked position, which is zero progress —
     // see registerChain's startKey guard) rather than hanging an
-    // unattended, possibly overnight batch run.
-    const maxRounds = games.length * 4 + 1000;
+    // unattended, possibly overnight batch run. Bounded by gameCount (games
+    // actually fed so far via feedGame), not games.length -- a streaming
+    // source has no length to consult upfront.
+    const maxRounds = gameCount * 4 + 1000;
     while (more) {
       if (++round > maxRounds) {
         throw new Error(`reconcileTranspositions did not converge after ${maxRounds} rounds -- likely a non-terminating resolution cycle (see the comment above this check)`);
@@ -383,15 +416,22 @@ export function buildPositionGraph(games, opts = {}) {
     }
   }
 
-  for (const game of games) {
+  let gameCount = 0;
+
+  function feedGame(game) {
+    gameCount++;
     const chess = new Chess();
     tallyResult(getOrCreate(chess.fen()), game.result); // the root is always tallied, unconditionally, same as every position
     advance(game, chess, 0);
     drainQueue(); // resolve any cascades this game triggered before starting the next -- keeps the queue bounded across millions of games rather than growing unboundedly until the very end
   }
-  reconcileTranspositions(); // the expensive multi-way-merge pass, only for whatever the cheap pass above left stuck
 
-  return nodes;
+  function finish() {
+    reconcileTranspositions(); // the expensive multi-way-merge pass, only for whatever the cheap pass above left stuck
+    return nodes;
+  }
+
+  return { feedGame, finish };
 }
 
 function tallyResult(node, result) {
