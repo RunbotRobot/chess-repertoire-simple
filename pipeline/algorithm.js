@@ -1,20 +1,27 @@
 // Core scoring/selection algorithm for the empirical repertoire pipeline.
 // See chess-repertoire-algorithm-spec.md (design doc) for the full
-// rationale — this module implements steps 1, 3, 4, 6 (transposition
-// handling only — see note below), 7, and 8 from that spec. It's pure and
-// I/O-free: given already-parsed games, it returns scored positions and a
-// materialized per-color repertoire tree. Bulk PGN ingestion, FEN
-// extraction from a real Lichess dump, and the lazy-expansion/game-ID
-// tracking optimization (spec step 5-6, needed to make a real multi-GB
-// dataset affordable) are a separate, not-yet-written concern — this
-// module intentionally walks every game to full depth rather than lazily
-// expanding only "hot" branches. That optimization changes cost, not
-// output: a lazily-expanded-and-re-expanded DAG and a fully-walked one
-// score identically, since a leaf's tally already includes every game that
-// passed through it regardless of how it continued (spec step 3). Fully
-// walking is simpler to get right first and is what this prototype exists
-// to validate — the real pipeline can add the cost optimization on top of
-// this same scoring logic once bulk data makes full-walking too slow.
+// rationale — this module implements steps 1, 3, 4, 5, 6, 7, and 8 from
+// that spec. It's pure and I/O-free: given already-parsed games, it
+// returns scored positions and a materialized per-color repertoire tree.
+// Bulk PGN ingestion and FEN extraction from a real Lichess dump are a
+// separate concern (see ingest.js). buildPositionGraph() below only gives a
+// position a real graph node of its own once that position has accumulated
+// >= minGames games (lazy hot-branch expansion, spec steps 5-6) — a
+// position that never gathers enough games never gets one.
+// That's the actual saving at real multi-GB scale: the returned graph
+// stays roughly the size of the qualifying repertoire rather than the size
+// of every position any game ever passed through, which is what makes a
+// full, unconditional walk balloon into millions of one-off nodes on real
+// data. This doesn't change what gets scored: scorePass()/
+// selectRepertoire() only ever consult positions with total >= minGames,
+// and any such position's tally is identical to what a full, unconditional
+// walk would produce, since a position's own tally only depends on which
+// games reached exactly that position, never on how far any of them got
+// walked past it (spec step 3). See buildPositionGraph's own doc comment
+// for the precise invariant, the two-phase mechanism that achieves it, and
+// its runtime cost trade-off (memory is the thing this saves — walltime
+// savings are real but more modest, and that's an intentional trade given
+// this pipeline runs unattended, not interactively).
 //
 // One deliberate departure from the spec doc's literal step 4 formula:
 // leafScore() below uses a Wilson score interval lower bound instead of a
@@ -43,25 +50,129 @@ export function positionKey(fen) {
 }
 
 /**
- * Walks every game's move list, accumulating per-position totals and
- * child-move structure into a single position graph, merging by
- * positionKey() so transpositions combine into one node regardless of how
- * many different move orders reached it.
+ * Builds the position graph via lazy hot-branch expansion (spec steps 5-6):
+ * a game is only walked past a position once that position has accumulated
+ * >= minGames total across ALL games seen so far — a genuinely cold/unique
+ * continuation (the overwhelming majority of any deep chess game) never
+ * gets walked into at all, which is the whole cost saving. A game parked
+ * at a cold position C is resumed the moment any of the following happens:
+ * C itself later accumulates enough direct traffic to go hot; some later
+ * position D further along THIS SAME game's own remaining move sequence
+ * turns out to already be hot (a transposition back into well-trodden
+ * territory, even though C itself never gets there); or D goes hot only
+ * once combined with this game's own pending contribution — several
+ * individually-cold move orders whose games are all separately waiting on
+ * the same eventual D, where none of them alone reaches minGames but their
+ * SUM does (spec step 6's actual real-world shape: a branch can go
+ * hot -> cold -> hot again via transposition, and the "hot again" can be
+ * many plies later and only reachable by merging several thin, sub-
+ * threshold paths, not just one already-strong one). Catching that last
+ * case requires checking a parked game against its ENTIRE remaining move
+ * sequence, not just its very next move, since real transpositions can
+ * reorder moves many plies apart — see the two-phase implementation note
+ * below for how that's kept affordable. Merges by positionKey() throughout,
+ * so transpositions combine into one node regardless of how many move
+ * orders reached it.
+ *
+ * Implemented in two phases so the expensive part (registering a parked
+ * game's ENTIRE remaining move sequence, spec step 6's multi-way-merge
+ * case) is only paid by games that actually need it, not by every park
+ * event: phase 1 walks all games once, parking each cold game under just
+ * its current position (cheap — O(1) per park) and resolving anything that
+ * unblocks directly; phase 2 (reconcileTranspositions) then takes whatever
+ * phase 1 left stuck and, ONLY for those, does the full remaining-path
+ * registration described above, looping since resolving one game can
+ * un-stick it only as far as its next cold ancestor, parking it again
+ * fresh. In practice most of a real dataset's parked games never resolve
+ * at all (a deep, one-off middlegame position simply never gathers
+ * minGames games) and so end up walked once by phase 2's dry run anyway —
+ * this still saves the FULL cost a naive full walk would pay (real node
+ * creation, edge bookkeeping, and re-walking the SAME cold subtree from
+ * every transposing game that reaches it) for a one-time position-only
+ * scan, which is where the actual win is: the returned graph's memory
+ * footprint stays near the size of the qualifying repertoire, not the
+ * size of everything any game ever played through.
+ *
+ * Invariant: for any position that ends up with total >= minGames — the
+ * only positions scorePass()/selectRepertoire() ever look at — its tally
+ * (total, whiteWins, draws, blackWins) and its children are IDENTICAL to
+ * what a full, unconditional walk of every game would produce. Why: a
+ * position's own tally only ever depends on which games reached exactly
+ * that position, never on how deep any of them got walked past it (spec
+ * step 3) — parking a game just defers recording its DEEPER positions, it
+ * never skips or double-counts the position it's parked at, and every
+ * parked game remains reachable (see above) for as long as any position on
+ * its remaining path could still go hot. Positions that never cross
+ * minGames may or may not end up materialized in the returned graph — this
+ * is harmless either way, since nothing downstream ever consults a
+ * below-threshold position.
+ *
+ * Callers must pass the SAME minGames to buildPositionGraph as they later
+ * pass to scorePass/selectRepertoire — a lower minGames here than there
+ * would mean some positions those passes want to treat as qualifying
+ * never got walked into and simply won't be in the graph at all.
  *
  * @param {Array<{id: string, result: 'white'|'black'|'draw', moves: string[]}>} games
  *   moves are SAN strings, applied in order from the standard start position.
- * @param {{maxPlies?: number}} [opts] maxPlies caps how deep any single game
- *   is walked (matching the app's own maxPlies concept) — games shorter
- *   than this are walked to their actual end; this only trims games that
- *   run long, so no position is ever double-counted or under-counted for a
- *   game that simply ended first.
+ * @param {{maxPlies?: number, minGames?: number}} [opts]
+ *   maxPlies caps how deep any single game is walked (matching the app's
+ *   own maxPlies concept) — games shorter than this are walked to their
+ *   actual end; this only trims games that run long, so no position is
+ *   ever double-counted or under-counted for a game that simply ended
+ *   first. minGames (default 10, matching the spec's qualifying
+ *   threshold) is the hotness bar a position must clear before any game is
+ *   walked past it.
  * @returns {Map<string, PositionNode>} keyed by positionKey(fen), where
  *   PositionNode = { fen, key, total, whiteWins, draws, blackWins,
  *   children: Map<san, {san, uci, key}> }
  */
 export function buildPositionGraph(games, opts = {}) {
   const maxPlies = Number.isFinite(opts.maxPlies) ? opts.maxPlies : Infinity;
+  const minGames = Number.isFinite(opts.minGames) ? opts.minGames : 10;
   const nodes = new Map();
+  // A game parked at a cold position is indexed two ways, since either
+  // event can be the one that eventually unblocks it:
+  //  - pendingByFrom[C]: the position the game is currently SITTING at (C)
+  //    might itself accumulate enough games directly to go hot on its own
+  //    (cheap, checked for every park — see park() below).
+  //  - pendingByTarget[D]: any position D further along the game's own
+  //    remaining move sequence might independently go hot via a totally
+  //    different move order transposing into it, even though C itself
+  //    never does (spec step 6's actual scenario). Populating this is the
+  //    expensive part, so it's deferred to reconcileTranspositions() and
+  //    only paid by records the cheap pendingByFrom path leaves stuck —
+  //    see registerChain() below.
+  // Both index the same record objects; `consumed` deduplicates a record
+  // that could otherwise be drained twice if both of its triggers fire.
+  const pendingByFrom = new Map();
+  const pendingByTarget = new Map();
+  // Cascading resolutions (one hot-crossing unblocking games that themselves
+  // trigger more crossings) are processed breadth-first through this queue
+  // rather than by direct recursive calls — a densely-transposed real
+  // dataset can chain thousands of these together, which blew the call
+  // stack (RangeError) when drainHot/fastForwardTo/advance called each
+  // other directly. `head` avoids O(n) Array#shift() on a queue that can
+  // grow into the millions.
+  const queue = [];
+  let queueHead = 0;
+  function enqueueAdvance(game, fen, plyIndex) {
+    queue.push({ kind: 'advance', game, fen, plyIndex });
+  }
+  function enqueueFastForward(record, targetKey) {
+    queue.push({ kind: 'fastForward', record, targetKey });
+  }
+  function drainQueue() {
+    while (queueHead < queue.length) {
+      const item = queue[queueHead++];
+      if (item.kind === 'advance') {
+        advance(item.game, new Chess(item.fen), item.plyIndex);
+      } else {
+        runFastForward(item.record, item.targetKey);
+      }
+    }
+    queue.length = 0;
+    queueHead = 0;
+  }
 
   const getOrCreate = (fen) => {
     const key = positionKey(fen);
@@ -73,30 +184,212 @@ export function buildPositionGraph(games, opts = {}) {
     return node;
   };
 
-  for (const game of games) {
-    const chess = new Chess();
-    let node = getOrCreate(chess.fen());
-    tallyResult(node, game.result);
+  function addPending(map, key, record) {
+    let list = map.get(key);
+    if (!list) { list = []; map.set(key, list); }
+    list.push(record);
+  }
 
+  // Plays game.moves[plyIndex] from chess's current position (assumed
+  // legal — every ply that reaches here has either passed the hotness gate
+  // or been explicitly proven safe to force through via transposition),
+  // tallies the resulting position, records the edge, and — if this tally
+  // is what pushes the resulting position over minGames for the first time
+  // — drains anything waiting on it. Returns the resulting node.
+  function applyOneMove(game, chess, plyIndex) {
+    const fromNode = getOrCreate(chess.fen());
+    const san = game.moves[plyIndex];
+    const move = chess.move(san);
+    if (!move) {
+      throw new Error(`illegal move "${san}" in game ${game.id ?? '(no id)'} at ply ${plyIndex}`);
+    }
+    const uci = move.from + move.to + (move.promotion || '');
+    const toNode = getOrCreate(chess.fen());
+    // A single parent can only reach a given child via one specific move
+    // (different moves from the same position always produce different
+    // FENs), so san is a safe, stable key for the children map even
+    // though it's not globally unique across positions.
+    if (!fromNode.children.has(san)) fromNode.children.set(san, { san, uci, key: toNode.key });
+    tallyResult(toNode, game.result);
+    maybeResolve(toNode.key);
+    return toNode;
+  }
+
+  // Advances one game from plyIndex onward (chess already replayed to that
+  // point), stopping the moment it reaches a position that isn't hot
+  // enough yet to justify walking past — except at the very first ply,
+  // which always proceeds regardless of the start position's own count,
+  // since nothing would ever get seeded otherwise.
+  function advance(game, chess, plyIndex) {
     const plies = Math.min(game.moves.length, maxPlies);
-    for (let i = 0; i < plies; i++) {
-      const san = game.moves[i];
-      const move = chess.move(san);
-      if (!move) {
-        throw new Error(`illegal move "${san}" in game ${game.id ?? '(no id)'} at ply ${i}`);
+    for (; plyIndex < plies; plyIndex++) {
+      const fromNode = getOrCreate(chess.fen());
+      if (plyIndex > 0 && fromNode.total < minGames) {
+        park(game, plyIndex, chess.fen());
+        return;
       }
-      const uci = move.from + move.to + (move.promotion || '');
-      const childFen = chess.fen();
-      const childNode = getOrCreate(childFen);
-      // A single parent can only reach a given child via one specific move
-      // (different moves from the same position always produce different
-      // FENs), so san is a safe, stable key for the children map even
-      // though it's not globally unique across positions.
-      if (!node.children.has(san)) node.children.set(san, { san, uci, key: childNode.key });
-      tallyResult(childNode, game.result);
-      node = childNode;
+      applyOneMove(game, chess, plyIndex);
     }
   }
+
+  // Parks a game at a cold position C, indexed only under C for now
+  // (pendingByFrom — C might itself accumulate enough direct traffic to go
+  // hot, the common case, resolved cheaply). The more expensive
+  // transposition-chain registration (see registerChain below) is deferred
+  // to reconcileTranspositions(), run once after the main pass, so its cost
+  // is paid only by the games that actually need it instead of by every
+  // single park event.
+  function park(game, plyIndex, fen) {
+    const record = { game, plyIndex, fen, consumed: false, chainRegistered: false };
+    addPending(pendingByFrom, positionKey(fen), record);
+  }
+
+  // The expensive fallback: registers a parked record under EVERY position
+  // its remaining move sequence would still pass through (pendingByTarget
+  // for each), not just the immediate next one. A single ply of lookahead
+  // isn't enough: real transpositions can reorder moves many plies apart
+  // (e.g. ...e6 played on move 1 vs move 4), so a game can be blocked at an
+  // early, genuinely sparse ancestor while a MUCH later position on its own
+  // path is a well-trodden transposition hub — that later position going
+  // hot (via however many other move orders feed it) must still be able to
+  // reach back and unblock this game. Only called from
+  // reconcileTranspositions() for records the cheap pendingByFrom path
+  // didn't resolve — most parked games never need this at all.
+  function registerChain(record) {
+    record.chainRegistered = true;
+    const startKey = positionKey(record.fen);
+    const probe = new Chess(record.fen);
+    const plies = Math.min(record.game.moves.length, maxPlies);
+    for (let i = record.plyIndex; i < plies; i++) {
+      const move = probe.move(record.game.moves[i]);
+      if (!move) break; // illegal -- advance()/runFastForward() will surface the real error if this game is ever actually resumed
+      const key = positionKey(probe.fen());
+      // A genuine in-game repetition can bring this exact game back to
+      // its OWN currently-parked position later in its own move sequence
+      // — registering that recurrence as one of this record's targets
+      // would be self-referential: "resolving" it is a zero-ply fast
+      // forward back to exactly where it already sits, so it never
+      // actually tallies anything, yet looks like real progress to
+      // maybeResolve's confirmed+pending prediction. That false signal
+      // reliably produced an infinite park/resolve/re-park cycle on real
+      // data (a repeating line pooling with itself). Skip it; the chain
+      // still registers every OTHER, genuinely later position.
+      if (key === startKey) continue;
+      addPending(pendingByTarget, key, record);
+      if (record.consumed) break; // resolved via an earlier (shallower) key in this same loop
+      maybeResolve(key);
+    }
+  }
+
+  // Runs after the main pass: repeatedly finds parked records that the
+  // cheap path never resolved and never had their transposition chain
+  // registered, registers them, and drains whatever that unblocks —
+  // which can itself park NEW records (a partially-resolved game running
+  // into a fresh cold ancestor further down its own path), so this loops
+  // until a full round registers nothing new.
+  function reconcileTranspositions() {
+    let more = true;
+    let round = 0;
+    // Each round can only set `more` by chain-registering a record for the
+    // FIRST time (chainRegistered is never unset), and every record is
+    // created by exactly one park() call, so the number of rounds needed
+    // is bounded by how many times games can collectively be parked — this
+    // cap is a generous multiple of that, purely a defensive fail-loudly
+    // guard against a future correctness bug reintroducing a non-
+    // terminating cycle (one already did, in development, on real data:
+    // real in-game repetition let a record look like it was resolving
+    // toward its own currently-parked position, which is zero progress —
+    // see registerChain's startKey guard) rather than hanging an
+    // unattended, possibly overnight batch run.
+    const maxRounds = games.length * 4 + 1000;
+    while (more) {
+      if (++round > maxRounds) {
+        throw new Error(`reconcileTranspositions did not converge after ${maxRounds} rounds -- likely a non-terminating resolution cycle (see the comment above this check)`);
+      }
+      more = false;
+      for (const list of pendingByFrom.values()) {
+        for (const record of list) {
+          if (!record.consumed && !record.chainRegistered) {
+            registerChain(record);
+            more = true;
+          }
+        }
+      }
+      drainQueue();
+    }
+  }
+
+  // Replays record.game from record.fen/record.plyIndex forward until it
+  // reaches targetKey (proven reachable — this key was registered from an
+  // actual dry-run replay of this exact game in park() above), tallying
+  // every intermediate position along the way exactly as a full walk
+  // would, then enqueues normal gated advancement from there (rather than
+  // continuing directly — see the queue comment above).
+  function runFastForward(record, targetKey) {
+    const chess = new Chess(record.fen);
+    let ply = record.plyIndex;
+    while (positionKey(chess.fen()) !== targetKey) {
+      applyOneMove(record.game, chess, ply);
+      ply++;
+    }
+    enqueueAdvance(record.game, chess.fen(), ply);
+  }
+
+  // The single trigger point for "does this position now qualify to be
+  // walked past": true either because its own confirmed tally alone
+  // clears minGames, or because confirmed + still-unconsumed pending
+  // arrivals via transposition (pendingByTarget) would clear it once
+  // resolved — the latter is what makes a merge-only crossing (spec step
+  // 6: several individually-cold move orders whose COMBINED total is what
+  // actually clears the threshold) actually happen, rather than deadlocking
+  // forever waiting for any single path to reach minGames on its own.
+  // Safe to call repeatedly/redundantly for the same key — resolving is
+  // idempotent once nothing is left pending.
+  function maybeResolve(key) {
+    const confirmed = nodes.get(key)?.total ?? 0;
+    if (confirmed < minGames) {
+      const pendingCount = (pendingByTarget.get(key) || []).filter((r) => !r.consumed).length;
+      if (confirmed + pendingCount < minGames) return;
+    }
+    drainHot(key);
+  }
+
+  function drainHot(key) {
+    // Target-side first: applying these is what actually raises this
+    // position's confirmed total, so anything waiting on the FROM side
+    // (below) sees the real, fully-updated total on its first attempt
+    // instead of re-parking and waiting for a second trigger.
+    const targetList = pendingByTarget.get(key);
+    if (targetList) {
+      pendingByTarget.delete(key);
+      for (const record of targetList) {
+        if (record.consumed) continue;
+        record.consumed = true;
+        // C (record.fen's position) — and everything between it and `key`
+        // — may still be cold; force this game's deferred moves through
+        // anyway, since its path to `key` is already proven, then resume
+        // normal gated advancement after.
+        enqueueFastForward(record, key);
+      }
+    }
+    const fromList = pendingByFrom.get(key);
+    if (fromList) {
+      pendingByFrom.delete(key); // once hot, always hot -- this key can't be re-queued into
+      for (const record of fromList) {
+        if (record.consumed) continue;
+        record.consumed = true;
+        enqueueAdvance(record.game, record.fen, record.plyIndex);
+      }
+    }
+  }
+
+  for (const game of games) {
+    const chess = new Chess();
+    tallyResult(getOrCreate(chess.fen()), game.result); // the root is always tallied, unconditionally, same as every position
+    advance(game, chess, 0);
+    drainQueue(); // resolve any cascades this game triggered before starting the next -- keeps the queue bounded across millions of games rather than growing unboundedly until the very end
+  }
+  reconcileTranspositions(); // the expensive multi-way-merge pass, only for whatever the cheap pass above left stuck
 
   return nodes;
 }
