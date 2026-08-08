@@ -141,7 +141,11 @@ export function buildPositionGraph(games, opts = {}) {
  * with `for await`), not just a plain array.
  *
  * @param {AsyncIterable<{id: string, result: 'white'|'black'|'draw', moves: string[]}>|Array} games
- * @param {{maxPlies?: number, minGames?: number}} [opts]
+ * @param {{maxPlies?: number, minGames?: number, initialNodes?: Map<string, PositionNode>, initialPending?: object}} [opts]
+ *   initialNodes/initialPending resume from a prior checkpoint's confirmed
+ *   graph and in-flight parked games respectively — see
+ *   createGraphBuilder's getPendingSnapshot() for the pending format and
+ *   what a resume does and doesn't preserve.
  * @returns {Promise<Map<string, PositionNode>>}
  */
 export async function buildPositionGraphAsync(games, opts = {}) {
@@ -150,17 +154,37 @@ export async function buildPositionGraphAsync(games, opts = {}) {
   return builder.finish();
 }
 
-// The shared engine behind both buildPositionGraph and
-// buildPositionGraphAsync — see buildPositionGraph's own doc comment above
-// for the full design rationale (lazy hot-branch expansion, the two-phase
-// cheap/expensive split, the work queue, the invariant). Takes games one
-// at a time via feedGame() so the caller controls whether the source is a
-// plain array (consumed with a sync for-loop) or an async stream (consumed
-// with for-await) without duplicating any of this logic.
-function createGraphBuilder(opts) {
+/**
+ * The shared engine behind both buildPositionGraph and
+ * buildPositionGraphAsync — see buildPositionGraph's own doc comment above
+ * for the full design rationale (lazy hot-branch expansion, the two-phase
+ * cheap/expensive split, the work queue, the invariant). Takes games one
+ * at a time via feedGame() so the caller controls whether the source is a
+ * plain array (consumed with a sync for-loop) or an async stream (consumed
+ * with for-await) without duplicating any of this logic.
+ *
+ * Exported (unlike a typical internal helper) so a long-running ingestion
+ * process can drive its own feed loop directly — feedGame() some games,
+ * call finish() to checkpoint a scoreable snapshot (and getPendingSnapshot()
+ * for a full, zero-loss checkpoint that also captures in-flight parked
+ * games), then keep feeding more into the SAME builder and finish() again
+ * later. Safe to call finish() multiple times over a builder's life:
+ * reconcileTranspositions() only does new work for records parked since
+ * the last call (each record's expensive chain registration only ever
+ * happens once, guarded by its own chainRegistered flag), so periodic
+ * finish() calls don't redundantly re-pay earlier calls' cost. See
+ * pipeline/chunked-ingest.mjs.
+ *
+ * @param {{maxPlies?: number, minGames?: number, initialNodes?: Map<string, PositionNode>, initialPending?: object}} opts
+ * @returns {{feedGame: (game: {id:string,result:string,moves:string[]}) => void, finish: () => Map<string, PositionNode>, getPendingSnapshot: () => object}}
+ */
+export function createGraphBuilder(opts) {
   const maxPlies = Number.isFinite(opts.maxPlies) ? opts.maxPlies : Infinity;
   const minGames = Number.isFinite(opts.minGames) ? opts.minGames : 10;
-  const nodes = new Map();
+  // Seeding from a prior checkpoint's nodes resumes accumulating into an
+  // already-confirmed graph rather than starting over -- see
+  // pipeline/chunked-ingest.mjs.
+  const nodes = opts.initialNodes instanceof Map ? opts.initialNodes : new Map();
   // A game parked at a cold position is indexed two ways, since either
   // event can be the one that eventually unblocks it:
   //  - pendingByFrom[C]: the position the game is currently SITTING at (C)
@@ -175,8 +199,36 @@ function createGraphBuilder(opts) {
   //    see registerChain() below.
   // Both index the same record objects; `consumed` deduplicates a record
   // that could otherwise be drained twice if both of its triggers fire.
+  // Every record gets a stable numeric id (see park() below) precisely so
+  // a checkpoint (getPendingSnapshot()) can serialize pendingByFrom and
+  // pendingByTarget as id references into one shared records list and
+  // reconstruct the SAME shared object on reload (see opts.initialPending
+  // below) — without that, a record consumed via one index after reload
+  // wouldn't be recognized as already-consumed via the other, and could
+  // be resolved (and counted) a second time.
   const pendingByFrom = new Map();
   const pendingByTarget = new Map();
+  let nextRecordId = 0;
+
+  // Seeding from a prior checkpoint's pending snapshot (see
+  // getPendingSnapshot() below) restores in-flight parked games exactly as
+  // they were, instead of silently dropping them — reconstructing each
+  // record ONCE and pointing both indices at the SAME object is what keeps
+  // `consumed` meaningful across the resume (see the comment above
+  // pendingByFrom for why that matters).
+  if (opts.initialPending) {
+    const recordsById = new Map();
+    for (const r of opts.initialPending.records) {
+      recordsById.set(r.id, { id: r.id, game: r.game, plyIndex: r.plyIndex, fen: r.fen, consumed: r.consumed, chainRegistered: r.chainRegistered });
+    }
+    for (const [key, ids] of opts.initialPending.pendingByFrom) {
+      pendingByFrom.set(key, ids.map((id) => recordsById.get(id)));
+    }
+    for (const [key, ids] of opts.initialPending.pendingByTarget) {
+      pendingByTarget.set(key, ids.map((id) => recordsById.get(id)));
+    }
+    nextRecordId = opts.initialPending.nextRecordId;
+  }
   // Cascading resolutions (one hot-crossing unblocking games that themselves
   // trigger more crossings) are processed breadth-first through this queue
   // rather than by direct recursive calls — a densely-transposed real
@@ -271,7 +323,7 @@ function createGraphBuilder(opts) {
   // is paid only by the games that actually need it instead of by every
   // single park event.
   function park(game, plyIndex, fen) {
-    const record = { game, plyIndex, fen, consumed: false, chainRegistered: false };
+    const record = { id: nextRecordId++, game, plyIndex, fen, consumed: false, chainRegistered: false };
     addPending(pendingByFrom, positionKey(fen), record);
   }
 
@@ -431,7 +483,36 @@ function createGraphBuilder(opts) {
     return nodes;
   }
 
-  return { feedGame, finish };
+  // A JSON-serializable snapshot of every still-parked, unresolved game --
+  // pass it back in as opts.initialPending on a fresh builder to resume
+  // with zero games lost, instead of silently dropping in-flight state.
+  // Call only after finish() (so the work queue is guaranteed drained --
+  // finish() always leaves it empty) for a consistent, complete snapshot.
+  function getPendingSnapshot() {
+    const recordsById = new Map();
+    function collect(map) {
+      for (const list of map.values()) {
+        for (const record of list) {
+          if (!record.consumed) recordsById.set(record.id, record);
+        }
+      }
+    }
+    collect(pendingByFrom);
+    collect(pendingByTarget);
+    const records = [...recordsById.values()].map((r) => ({ id: r.id, game: r.game, plyIndex: r.plyIndex, fen: r.fen, consumed: r.consumed, chainRegistered: r.chainRegistered }));
+    const toIdList = (map) =>
+      [...map.entries()]
+        .map(([key, list]) => [key, list.filter((r) => !r.consumed).map((r) => r.id)])
+        .filter(([, ids]) => ids.length > 0);
+    return {
+      records,
+      pendingByFrom: toIdList(pendingByFrom),
+      pendingByTarget: toIdList(pendingByTarget),
+      nextRecordId,
+    };
+  }
+
+  return { feedGame, finish, getPendingSnapshot };
 }
 
 function tallyResult(node, result) {
