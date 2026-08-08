@@ -7,14 +7,18 @@ require a real origin).
 
 ## How it works
 
-1. **Setup** pulls move-frequency data live from the
+1. **Setup** picks where repertoire data comes from — either live from the
    [Lichess Opening Explorer](https://lichess.org/api#tag/Opening-Explorer)
-   for whichever colors/rating bands/time controls you pick, and builds a
-   repertoire tree:
+   for whichever colors/rating bands/time controls you pick, or from a
+   precomputed `repertoire-white.json`/`repertoire-black.json` file (the
+   periodic checkpoint output of `pipeline/chunked-ingest.mjs`'s bulk PGN
+   ingestion — see `pipeline/`) fetched from a folder you configure. Either
+   way, the resulting repertoire tree follows the same rule:
    - On *your* moves, it always takes whichever legal reply scored highest
      in those real games, with draws counted as a loss.
    - On the *opponent's* moves, it keeps every reply that's actually common
-     (configurable thresholds) — you need to be ready for whichever one
+     (configurable thresholds, in live mode; baked into the pipeline's own
+     thresholds in local mode) — you need to be ready for whichever one
      shows up.
 2. **Browse** lets you step through the resulting tree with a board, to
    sanity-check what it picked before you trust it.

@@ -1,13 +1,15 @@
-// App-shell cache only. Repertoire data always comes live from the Lichess
-// explorer API — that traffic is never intercepted here, so quizzing always
-// reflects the current rolling window rather than a stale cached snapshot.
+// App-shell cache only. Repertoire data comes either live from the Lichess
+// explorer API, or from a local repertoire-{white,black}.json checkpoint
+// file (js/repertoireSource.js) -- neither is intercepted here (see the
+// repertoire-*.json bypass below), so quizzing always reflects live/current
+// data rather than a stale cached snapshot.
 //
 // The number in CACHE must match APP_VERSION in js/app.js and bump on every
 // deploy that changes any cached file. The browser only re-installs this
 // worker (and thus only re-fetches the shell) when sw.js's own bytes
 // change — if this string doesn't change, updates to app.js/explorer.js/etc.
 // silently never reach clients, no matter how many times they're deployed.
-const CACHE = 'opening-drill-v39';
+const CACHE = 'opening-drill-v40';
 const SHELL_FILES = [
   './',
   './index.html',
@@ -28,6 +30,7 @@ const SHELL_FILES = [
   './js/explorer.js',
   './js/positionCache.js',
   './js/quiz.js',
+  './js/repertoireSource.js',
   './js/speech.js',
   './js/storage.js',
   './js/wakelock.js',
@@ -63,6 +66,15 @@ self.addEventListener('activate', (event) => {
 self.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url);
   if (url.origin !== self.location.origin) return; // let live API calls pass straight through
+  // Repertoire checkpoint files (repertoireSource.js's local data source)
+  // get overwritten repeatedly by an in-progress ingestion run and are
+  // fetched with {cache:'no-store'} specifically to always see the latest
+  // one -- but that request option only controls the browser's own HTTP
+  // cache, not this service worker's interception below, which would
+  // otherwise cache the first response it ever saw here and keep serving
+  // that same stale snapshot indefinitely. Let these pass straight through
+  // instead, same as a cross-origin request.
+  if (/\/repertoire-(white|black)\.json$/.test(url.pathname)) return;
 
   event.respondWith(
     caches.match(event.request).then((cached) => {

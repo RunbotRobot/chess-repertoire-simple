@@ -1,5 +1,6 @@
 import { DEFAULT_SETTINGS, loadSettings, saveSettings } from './storage.js';
 import { getPosition, peekPosition } from './explorer.js';
+import { getLocalPosition, peekLocalPosition, forgetLocalRepertoire, peekLoadedMeta } from './repertoireSource.js';
 import { getCacheStats, clearCache } from './positionCache.js';
 import { renderBoard } from './board.js';
 import * as speech from './speech.js';
@@ -14,7 +15,7 @@ import { Chess } from './vendor/chess.esm.js';
 // devtools is actually running the latest code, and it also drives the
 // service worker's cache name (see sw.js) so updates actually take effect
 // instead of being served stale from the offline cache.
-export const APP_VERSION = 39;
+export const APP_VERSION = 40;
 
 const COLOR_OPTIONS = ['white', 'black'];
 const RATING_OPTIONS = ['1000', '1200', '1400', '1600', '1800', '2000', '2200', '2500'];
@@ -118,6 +119,10 @@ function buildChipRows() {
 
 function fillSettingsForm() {
   buildChipRows();
+  const dataSourceRadio = $$('input[name=dataSource]').find((r) => r.value === settings.dataSource);
+  if (dataSourceRadio) $$('input[name=dataSource]').forEach((r) => { r.checked = r === dataSourceRadio; });
+  $('#localDataUrl').value = settings.localDataUrl || '';
+  updateDataSourceVisibility();
   $('#lichessToken').value = settings.lichessToken || '';
   $('#minSampleSize').value = settings.minSampleSize;
   $('#opponentBranchMinShare').value = Math.round(settings.opponentBranchMinShare * 100);
@@ -146,6 +151,47 @@ function populateVoices() {
 }
 if (window.speechSynthesis) window.speechSynthesis.onvoiceschanged = populateVoices;
 
+function updateDataSourceVisibility() {
+  const isLocal = $$('input[name=dataSource]:checked')[0]?.value === 'local';
+  $('#localDataUrl-field').style.display = isLocal ? '' : 'none';
+  if (isLocal) renderLocalDataStatus();
+}
+$$('input[name=dataSource]').forEach((r) => r.addEventListener('change', updateDataSourceVisibility));
+
+function renderLocalDataStatus() {
+  const el = $('#local-data-status');
+  if (!el) return;
+  const white = peekLoadedMeta('white');
+  const black = peekLoadedMeta('black');
+  if (!white && !black) { el.textContent = 'Not loaded yet — loads automatically the first time Browse or Quiz needs a position.'; return; }
+  const describe = (color, meta) => meta
+    ? `${cap(color)}: generated ${meta.generatedAt ? new Date(meta.generatedAt).toLocaleString() : 'unknown time'} (min ${meta.minGames} games/position)`
+    : `${cap(color)}: not loaded yet`;
+  el.textContent = `${describe('white', white)}. ${describe('black', black)}.`;
+}
+
+$('#refresh-local-data')?.addEventListener('click', async () => {
+  const btn = $('#refresh-local-data');
+  const original = btn.textContent;
+  btn.textContent = 'Refreshing…';
+  btn.disabled = true;
+  try {
+    forgetLocalRepertoire('white');
+    forgetLocalRepertoire('black');
+    await Promise.all([
+      getLocalPosition([], 'white', settings),
+      getLocalPosition([], 'black', settings),
+    ]);
+    log('Local repertoire data refreshed.');
+  } catch (err) {
+    log(`Failed to refresh local repertoire data: ${err.message}`);
+  } finally {
+    renderLocalDataStatus();
+    btn.textContent = original;
+    btn.disabled = false;
+  }
+});
+
 function readDebugPref() {
   return localStorage.getItem('chessrep.showDebug') !== '0';
 }
@@ -153,6 +199,8 @@ function readDebugPref() {
 function readSettingsForm() {
   return {
     ...settings,
+    dataSource: $$('input[name=dataSource]:checked')[0]?.value || DEFAULT_SETTINGS.dataSource,
+    localDataUrl: $('#localDataUrl').value.trim() || DEFAULT_SETTINGS.localDataUrl,
     lichessToken: $('#lichessToken').value.trim(),
     colors: $$('input[name=colors]:checked').map((i) => i.value),
     ratingBands: $$('input[name=ratings]:checked').map((i) => i.value),
@@ -360,13 +408,24 @@ async function renderBrowse() {
     movelist.appendChild(back);
   }
 
-  const { node, cached } = await peekPosition(browsePath.map((s) => s.uci), browseColor, settings);
+  const peek = settings.dataSource === 'local' ? peekLocalPosition : peekPosition;
+  let node, cached;
+  try {
+    ({ node, cached } = await peek(browsePath.map((s) => s.uci), browseColor, settings));
+  } catch (err) {
+    if (myRequestId !== browseRequestId) return;
+    movelist.insertAdjacentHTML('beforeend', `<div class="hint">Couldn't load local repertoire data: ${err.message}</div>`);
+    return;
+  }
   if (myRequestId !== browseRequestId) return;
   browseCurrentNode = node;
   browseCurrentCached = cached;
 
   if (!cached) {
-    movelist.insertAdjacentHTML('beforeend', `<div class="hint">Not fetched yet. Positions are only fetched while quizzing — run a quiz with these rating/speed filters to reach and cache this one.</div>`);
+    const msg = settings.dataSource === 'local'
+      ? 'Not loaded yet.'
+      : 'Not fetched yet. Positions are only fetched while quizzing — run a quiz with these rating/speed filters to reach and cache this one.';
+    movelist.insertAdjacentHTML('beforeend', `<div class="hint">${msg}</div>`);
     return;
   }
 
@@ -639,6 +698,12 @@ async function enterQuiz() {
 // starts at 1 and grows as escalation actually happens, rather than
 // assuming the worst case up front.
 function makeGetNode(color, { onBeforeFetch, onFetchProgress }) {
+  if (settings.dataSource === 'local') {
+    return async (uciPath) => {
+      const { node } = await getLocalPosition(uciPath, color, settings, { onBeforeFetch, onFetchProgress });
+      return node;
+    };
+  }
   return async (uciPath) => {
     const { node } = await getPosition(uciPath, color, settings, { onBeforeFetch, onFetchProgress });
     return node;
@@ -671,7 +736,7 @@ $('#start-quiz').addEventListener('click', async () => {
   const quizMode = quizColorRadios.find((r) => r.checked).value; // 'white' | 'black' | 'both'
   const inputMethod = quizInputRadios.find((r) => r.checked).value; // 'voice' | 'manual'
 
-  if (!settings.lichessToken) {
+  if (settings.dataSource === 'live' && !settings.lichessToken) {
     $('#quiz-mic-warn').textContent = 'No Lichess API token set — add one in Setup first.';
     return;
   }

@@ -690,6 +690,7 @@ export function selectRepertoire(graph, scores, color, minGames, rootFen) {
       blackWins: node.blackWins,
       score: scored ? scored.score : leafScore(node, color),
       myMove: null,
+      alternates: null, // set only alongside myMove — see below
       replies: null,
     };
     if (!scored || scored.isLeaf) return base; // nothing below the threshold to select into
@@ -703,11 +704,21 @@ export function selectRepertoire(graph, scores, color, minGames, rootFen) {
       // identified by scorePass — recompute which one that was (scorePass
       // only kept the numeric best, not a pointer) by matching the score.
       let best = null;
-      for (const { edge, child } of qualifying) {
-        const s = scores.get(child.key)?.score ?? leafScore(child, color);
-        if (best === null || s > best.s) best = { edge, s };
+      const scored = qualifying.map(({ edge, child }) => ({ edge, child, s: scores.get(child.key)?.score ?? leafScore(child, color) }));
+      for (const c of scored) {
+        if (best === null || c.s > best.s) best = c;
       }
-      if (best) base.myMove = { san: best.edge.san, uci: best.edge.uci, score: best.s, child: build(best.edge.key) };
+      if (best) {
+        base.myMove = { san: best.edge.san, uci: best.edge.uci, score: best.s, child: build(best.edge.key) };
+        // Other qualifying candidates at this same decision point, not
+        // themselves recursed into (this pass only ever follows the single
+        // best one) — kept here purely for Browse/UI reference, the same
+        // role explorer.js's live-API alternates play.
+        base.alternates = scored
+          .filter((c) => c !== best)
+          .map((c) => ({ san: c.edge.san, uci: c.edge.uci, score: c.s, games: c.child.total }))
+          .sort((a, b) => b.score - a.score);
+      }
     } else {
       base.replies = qualifying
         .map(({ edge, child }) => ({
@@ -731,6 +742,7 @@ every .child):
   {
     fen, sideToMove, total, whiteWins, draws, blackWins, score,
     myMove: { san, uci, score, child: RepertoireNode } | null,   // set only at the builder's own decision points that had a qualifying move
+    alternates: [{ san, uci, score, games }] | null,   // other qualifying candidates at that same decision point, not followed further (reference only); set only alongside myMove, sorted by score desc
     replies: [{ san, uci, games, share, child: RepertoireNode }] | null,  // set only at the opponent's decision points, sorted by games desc
   }
 Exactly one of myMove/replies is non-null at any node with a qualifying

@@ -213,12 +213,20 @@ async function checkpointAndScore() {
   writeAtomic(pendingPath, JSON.stringify(pendingSnapshot));
   writeAtomic(metaPath, JSON.stringify({ gamesProcessed: totalGamesProcessed, updatedAt: new Date().toISOString(), source: url, maxPlies, minGames }));
 
+  const generatedAt = new Date().toISOString();
   const whiteScores = scorePass(nodes, 'white', minGames);
   const blackScores = scorePass(nodes, 'black', minGames);
   const whiteRepertoire = selectRepertoire(nodes, whiteScores, 'white', minGames);
   const blackRepertoire = selectRepertoire(nodes, blackScores, 'black', minGames);
-  writeAtomic(whiteOutPath, JSON.stringify(whiteRepertoire));
-  writeAtomic(blackOutPath, JSON.stringify(blackRepertoire));
+  // Wrapped with minGames/generatedAt (rather than writing the bare
+  // RepertoireNode tree) so a consumer -- the app's repertoireSource.js --
+  // can tell a genuine data-scarcity leaf (total < minGames) apart from a
+  // "plenty of games, just none individually qualifying" leaf without
+  // hardcoding the threshold this run happened to use, and can show how
+  // fresh the data is, since this file gets overwritten repeatedly during a
+  // long-running ingestion.
+  writeAtomic(whiteOutPath, JSON.stringify({ minGames, generatedAt, root: whiteRepertoire }));
+  writeAtomic(blackOutPath, JSON.stringify({ minGames, generatedAt, root: blackRepertoire }));
 
   const rootKey = positionKey(new Chess().fen());
   const rootNode = nodes.get(rootKey);

@@ -119,6 +119,28 @@
   <main>
     <section class="view active" id="view-setup">
       <div class="card">
+        <h3>Repertoire data source</h3>
+        <div class="row" id="dataSource-row">
+          <label class="chip"><input type="radio" name="dataSource" value="live" checked> Live (Lichess Explorer API)</label>
+          <label class="chip"><input type="radio" name="dataSource" value="local"> Local (precomputed file)</label>
+        </div>
+        <div class="field" id="localDataUrl-field" style="display:none;">
+          <label for="localDataUrl">Local repertoire data folder</label>
+          <input type="text" id="localDataUrl" placeholder="./data">
+          <div class="hint">
+            Fetches <code>repertoire-white.json</code> / <code>repertoire-black.json</code> from this folder —
+            the periodic checkpoint output of the bulk ingestion pipeline (<code>pipeline/chunked-ingest.mjs</code>).
+            The Lichess account and scoring/pruning settings below don't apply in this mode; the pipeline already
+            baked its own thresholds into the data.
+          </div>
+          <div id="local-data-status" class="hint" style="margin-top:6px;">Not loaded yet.</div>
+          <div class="btn-row" style="margin-top:8px;">
+            <button class="btn secondary" id="refresh-local-data">Refresh local data</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
         <h3>Lichess account</h3>
         <div class="field">
           <label for="lichessToken">API token (required)</label>
