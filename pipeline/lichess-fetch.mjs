@@ -64,7 +64,15 @@ async function fetchBatchOnce(ids) {
 // a theoretical concern) -- retries are unbounded rather than capped,
 // since this runs unattended for potentially days and a 429 is a "wait,
 // not a failure" signal, not a reason to crash the whole ingestion.
-const rateLimitState = { cooldownUntil: 0, consecutiveHits: 0 };
+const rateLimitState = { cooldownUntil: 0, consecutiveHits: 0, totalHits: 0 };
+
+// Exposed purely for external progress logging (chunked-ingest.mjs) -- a
+// long reconciliation with no other visible cause for slowness is
+// otherwise indistinguishable from "just a big backlog" vs. "getting
+// rate-limited the whole time", from outside this module.
+export function getRateLimitStats() {
+  return { consecutiveHits: rateLimitState.consecutiveHits, totalHits: rateLimitState.totalHits, cooldownMsRemaining: Math.max(0, rateLimitState.cooldownUntil - Date.now()) };
+}
 
 async function waitForCooldown() {
   const remaining = rateLimitState.cooldownUntil - Date.now();
@@ -73,6 +81,7 @@ async function waitForCooldown() {
 
 function registerRateLimitHit() {
   rateLimitState.consecutiveHits++;
+  rateLimitState.totalHits++;
   const backoffMs = Math.min(60000, 2000 * 2 ** (rateLimitState.consecutiveHits - 1));
   rateLimitState.cooldownUntil = Math.max(rateLimitState.cooldownUntil, Date.now() + backoffMs);
 }

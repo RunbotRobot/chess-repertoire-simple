@@ -41,7 +41,7 @@ import { join } from 'node:path';
 import { parsePgnGamesStream } from './ingest.js';
 import { scorePass, selectRepertoire, positionKey } from './algorithm.js';
 import { createStreamingGraphBuilder } from './streaming-engine.mjs';
-import { fetchGamesBatch } from './lichess-fetch.mjs';
+import { fetchGamesBatch, getRateLimitStats } from './lichess-fetch.mjs';
 import { Chess } from '../js/vendor/chess.esm.js';
 
 const url = process.argv[2];
@@ -199,7 +199,9 @@ const builder = createStreamingGraphBuilder({
   onFetch: (s) => {
     if (s.completed === s.total || s.completed - lastFetchLogAt >= 20) {
       lastFetchLogAt = s.completed;
-      log(`    [${s.phase}] fetched ${s.completed}/${s.total} batches`);
+      const rl = getRateLimitStats();
+      const rlNote = rl.totalHits > 0 ? `, rate-limited ${rl.totalHits}x total (${rl.consecutiveHits} in a row, ${(rl.cooldownMsRemaining / 1000).toFixed(0)}s cooldown left)` : '';
+      log(`    [${s.phase}] fetched ${s.completed}/${s.total} batches${rlNote}`);
     }
   },
 });
