@@ -179,10 +179,32 @@ fetcher.stdout.on('data', (chunk) => { bytesFetched += chunk.length; });
 fetcher.stdout.pipe(zstd.stdin);
 fetcher.stdout.on('error', (err) => { if (err.code !== 'EPIPE') log(`fetcher stream error: ${err.message}`); });
 zstd.stdin.on('error', (err) => { if (err.code !== 'EPIPE') log(`zstd stdin error: ${err.message}`); });
+// Tracked so the main loop can tell a genuine end-of-stream (the for-await
+// below just sees its source end either way) apart from the download or
+// decompression having actually failed partway through (observed: a
+// truncated/corrupted download makes zstd exit nonzero) -- without this,
+// that failure reads as "Stream exhausted" and the run reports success
+// having processed a tiny fraction of the dump, silently stalling the
+// whole month's progress while looking healthy in the Actions UI.
+//
+// fetcherDone/zstdDone/pipelineSettled exist because of a real race,
+// observed in practice: the for-await loop's source can hit EOF and let
+// the loop finish BEFORE both child processes' own 'exit' events have
+// actually fired (a real run's "zstd exited with code 1" log line landed
+// *after* "Stream exhausted" had already printed) -- so the loop can't
+// just check pipelineFailure the instant it ends; it has to wait for both
+// processes to genuinely finish first.
+let pipelineFailure = null;
+let fetcherDone = false;
+let zstdDone = false;
+let resolvePipelineSettled;
+const pipelineSettled = new Promise((resolve) => { resolvePipelineSettled = resolve; });
 for (const [proc, name] of [[fetcher, isUrl ? 'curl' : 'cat'], [zstd, 'zstd']]) {
   proc.on('exit', (code, signal) => {
-    if (code !== 0 && code !== null) log(`${name} exited with code ${code}`);
-    if (signal) log(`${name} killed by signal ${signal}`);
+    if (code !== 0 && code !== null) { log(`${name} exited with code ${code}`); pipelineFailure ??= `${name} exited with code ${code}`; }
+    if (signal) { log(`${name} killed by signal ${signal}`); pipelineFailure ??= `${name} killed by signal ${signal}`; }
+    if (proc === fetcher) fetcherDone = true; else zstdDone = true;
+    if (fetcherDone && zstdDone) resolvePipelineSettled();
   });
 }
 
@@ -292,6 +314,25 @@ for await (const game of source) {
     chunkStart = Date.now();
     gamesThisChunk = 0;
   }
+}
+
+// Both child processes' 'exit' handlers may not have run yet the instant
+// the loop above ends (see the race noted where pipelineFailure is
+// declared) -- wait for them, bounded, so a real failure that landed
+// slightly late isn't missed.
+await Promise.race([pipelineSettled, new Promise((resolve) => setTimeout(resolve, 5000))]);
+
+if (pipelineFailure) {
+  // The stream ending here is NOT a genuine "reached the end of the dump"
+  // -- checkpoint whatever real progress was made anyway (a resume on the
+  // next run will pick up right from here, same as any other interruption)
+  // but exit nonzero so this is never mistaken for a successful,
+  // completed pass over the whole file.
+  log(`Download/decompress pipeline failed (${pipelineFailure}) before the stream was actually exhausted. Saving a checkpoint of what was processed so far; the next run will resume from here.`);
+  reportProgress();
+  await checkpointAndScore();
+  log('Exiting with failure -- this run did NOT reach the end of the dump.');
+  process.exit(1);
 }
 
 log(`Stream exhausted (${parseStats.skipped ?? 0} games skipped as unfinished across the whole run) -- final checkpoint:`);
