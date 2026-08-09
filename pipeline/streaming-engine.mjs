@@ -74,7 +74,7 @@ function tallyResult(node, result) {
  *   into finish() -- a single call can run for a long time on a real
  *   month-scale cold-start backlog, entirely inside network awaits a
  *   caller otherwise has no visibility into.
- * @returns {{feedGame: (game:{id:string,result:string,moves:string[]}) => void, finish: () => Promise<Map>, getPendingSnapshot: () => object}}
+ * @returns {{feedGame: (game:{id:string,result:string,moves:string[]}) => void, finish: (finishOpts?: {deadlineMs?: number}) => Promise<Map>, getPendingSnapshot: () => object, getActivePendingCount: () => number}}
  */
 export function createStreamingGraphBuilder(opts) {
   const maxPlies = Number.isFinite(opts.maxPlies) ? opts.maxPlies : Infinity;
@@ -87,6 +87,11 @@ export function createStreamingGraphBuilder(opts) {
   const pendingByTarget = new Map();
   let nextRecordId = 0;
   let gameCount = 0;
+  // Maintained incrementally (not recomputed by scanning pendingByFrom,
+  // which can hold hundreds of thousands of entries on a real month-scale
+  // run) so callers can cheaply throttle feeding against it -- see
+  // getActivePendingCount() below.
+  let activePendingCount = 0;
 
   // Restores every still-parked game as a freshly-parked record (chainRegistered:
   // false) rather than replaying its expanded pendingByTarget registration
@@ -100,6 +105,7 @@ export function createStreamingGraphBuilder(opts) {
     for (const r of opts.initialPending.records) {
       const record = { id: r.id, gameId: r.gameId, result: r.result, plyIndex: r.plyIndex, fen: r.fen, consumed: false, chainRegistered: false };
       addPending(pendingByFrom, positionKey(r.fen), record);
+      activePendingCount++;
     }
     nextRecordId = opts.initialPending.nextRecordId;
   }
@@ -137,6 +143,7 @@ export function createStreamingGraphBuilder(opts) {
   function park(gameId, result, plyIndex, fen) {
     const record = { id: nextRecordId++, gameId, result, plyIndex, fen, consumed: false, chainRegistered: false };
     addPending(pendingByFrom, positionKey(fen), record);
+    activePendingCount++;
   }
 
   function feedGame(game) {
@@ -235,6 +242,7 @@ export function createStreamingGraphBuilder(opts) {
       for (const record of targetList) {
         if (record.consumed) continue;
         record.consumed = true;
+        activePendingCount--;
         enqueueFastForward(record, key);
       }
     }
@@ -244,6 +252,7 @@ export function createStreamingGraphBuilder(opts) {
       for (const record of fromList) {
         if (record.consumed) continue;
         record.consumed = true;
+        activePendingCount--;
         enqueueAdvance(record.gameId, record.result, record.fen, record.plyIndex);
       }
     }
@@ -282,29 +291,60 @@ export function createStreamingGraphBuilder(opts) {
     queueHead = 0;
   }
 
-  // Runs reconciliation to a fixed point: each round batch-fetches every
-  // not-yet-registered record's moves, registers them (which may cascade
+  // Caps how many records one round registers -- without this, a round on
+  // a real month-scale backlog can mean a single ~5-hour uninterruptible
+  // fetch (measured: 1548 batches in one round), which defeats deadlineMs
+  // below entirely: the deadline is only ever checked BETWEEN rounds, so
+  // an unbounded round makes that check meaningless. 300 matches
+  // MAX_IDS_PER_REQUEST (lichess-fetch.mjs) -- each record needs at most
+  // one distinct game id, so this bounds a round to roughly one HTTP
+  // batch's worth of fetch time regardless of total backlog size.
+  const REGISTER_BATCH_CAP = 300;
+
+  // Runs reconciliation: each round batch-fetches up to REGISTER_BATCH_CAP
+  // not-yet-registered records' moves, registers them (which may cascade
   // into resolutions via the queue, itself fetching whatever else that
-  // needs), and repeats until a round finds nothing left to register and
-  // the queue is empty. Safe to call repeatedly over a builder's life,
-  // same as algorithm.js's finish() -- each record's registration only
-  // ever happens once (chainRegistered), so periodic calls (once per
-  // checkpoint) don't redundantly re-pay earlier calls' cost.
-  async function finish() {
+  // needs), and repeats. Safe to call repeatedly over a builder's life --
+  // each record's registration only ever happens once (chainRegistered),
+  // so periodic calls (once per checkpoint) don't redundantly re-pay
+  // earlier calls' cost.
+  //
+  // @param {{deadlineMs?: number}} [finishOpts] deadlineMs is an absolute
+  //   Date.now()-comparable timestamp; without it, runs to full
+  //   convergence (every prior behavior, and what every existing test
+  //   exercises). With it, returns as soon as the deadline passes,
+  //   between rounds, leaving whatever's left exactly as unregistered as
+  //   before -- a later finish() call picks it back up, identically to a
+  //   fresh checkpoint-reload resume (see initialPending above), just
+  //   without the serialize/reload round-trip. This exists because a real
+  //   month-scale dataset's reconciliation can take far longer than any
+  //   single checkpoint interval a caller wants to keep to (chunked-
+  //   ingest.mjs uses it to guarantee a fresh, if incomplete, repertoire
+  //   snapshot lands on a predictable cadence regardless of how far
+  //   behind reconciliation has fallen) -- publishing a partial-depth
+  //   snapshot is honest, not incorrect: a position reconciliation hasn't
+  //   reached yet is indistinguishable from one that's genuinely too rare
+  //   to qualify yet, the same leaf case the very first checkpoint of any
+  //   run already has to handle.
+  // @returns {Promise<Map>}
+  async function finish(finishOpts = {}) {
+    const deadlineMs = finishOpts.deadlineMs;
     let round = 0;
     const maxRounds = gameCount * 4 + 1000;
     const movesCache = new Map();
     for (;;) {
+      if (deadlineMs !== undefined && Date.now() > deadlineMs) return nodes;
       if (++round > maxRounds) {
         throw new Error(`streaming reconciliation did not converge after ${maxRounds} rounds -- likely a non-terminating resolution cycle`);
       }
-      const needRegistration = [];
+      const needRegistrationAll = [];
       for (const list of pendingByFrom.values()) {
         for (const record of list) {
-          if (!record.consumed && !record.chainRegistered) needRegistration.push(record);
+          if (!record.consumed && !record.chainRegistered) needRegistrationAll.push(record);
         }
       }
-      if (needRegistration.length === 0 && queueHead >= queue.length) break;
+      if (needRegistrationAll.length === 0 && queueHead >= queue.length) break;
+      const needRegistration = needRegistrationAll.slice(0, REGISTER_BATCH_CAP);
 
       let fetchCount = 0;
       if (needRegistration.length > 0) {
@@ -330,10 +370,19 @@ export function createStreamingGraphBuilder(opts) {
       // much" while a finish() call is in flight, since feedGame() itself
       // never awaits anything and callers can't see inside a single finish()
       // call any other way.
-      opts.onRound?.({ round, toRegister: needRegistration.length, fetched: fetchCount, queueLength: queue.length - queueHead });
+      opts.onRound?.({ round, toRegister: needRegistration.length, toRegisterTotal: needRegistrationAll.length, fetched: fetchCount, queueLength: queue.length - queueHead });
       await drainQueue(movesCache);
     }
     return nodes;
+  }
+
+  // Cheap O(1) read of how many parked games are currently unresolved --
+  // for a caller to throttle feeding against (pause once this gets large
+  // enough that reconciliation plausibly can't keep pace), rather than
+  // letting it grow without bound over a run where production outpaces
+  // reconciliation throughput.
+  function getActivePendingCount() {
+    return activePendingCount;
   }
 
   // A JSON-serializable snapshot of every still-parked, unresolved game --
@@ -364,5 +413,5 @@ export function createStreamingGraphBuilder(opts) {
     return { records, nextRecordId };
   }
 
-  return { feedGame, finish, getPendingSnapshot };
+  return { feedGame, finish, getPendingSnapshot, getActivePendingCount };
 }

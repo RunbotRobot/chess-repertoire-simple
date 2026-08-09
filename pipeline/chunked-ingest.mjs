@@ -32,8 +32,26 @@
 // access to Lichess (beyond the initial dump download) whenever it's
 // actually reconciling, not just while streaming the dump.
 //
+// Local ingestion throughput (measured on the real July 2026 dump: ~1500
+// games/s) vastly outpaces how fast parked games can be politely
+// re-fetched from Lichess's API for reconciliation (measured: needing
+// ~5+ hours to register a single 5-minute chunk's backlog) -- so this
+// can't just feed continuously and reconcile whenever; two mechanisms
+// keep it on a predictable, bounded cadence instead:
+//   - builder.finish() is called with a deadline (this chunk's own
+//     chunkMinutes boundary), so a fresh checkpoint -- however far
+//     reconciliation actually got -- lands roughly every chunkMinutes no
+//     matter how large the backlog is. A position reconciliation hasn't
+//     reached yet just reads as a leaf (not enough data *yet*), the same
+//     honest state the very first checkpoint of any run is already in.
+//   - feeding pauses early, before chunkMinutes elapses, once the
+//     currently-unresolved backlog (builder.getActivePendingCount())
+//     passes maxPendingBacklog -- otherwise production would keep
+//     outrunning reconciliation by orders of magnitude, growing the
+//     in-memory backlog without bound over a month-long run.
+//
 // Usage:
-//   node chunked-ingest.mjs <url> <checkpointDir> [chunkMinutes] [maxPlies] [minGames]
+//   node chunked-ingest.mjs <url> <checkpointDir> [chunkMinutes] [maxPlies] [minGames] [maxPendingBacklog]
 
 import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, appendFileSync } from 'node:fs';
@@ -49,9 +67,10 @@ const checkpointDir = process.argv[3];
 const chunkMinutes = process.argv[4] ? Number(process.argv[4]) : 60;
 const maxPlies = process.argv[5] ? Number(process.argv[5]) : 40;
 const minGames = process.argv[6] ? Number(process.argv[6]) : 10;
+const maxPendingBacklog = process.argv[7] ? Number(process.argv[7]) : 100000;
 
 if (!url || !checkpointDir) {
-  console.error('Usage: node chunked-ingest.mjs <url> <checkpointDir> [chunkMinutes=60] [maxPlies=40] [minGames=10]');
+  console.error('Usage: node chunked-ingest.mjs <url> <checkpointDir> [chunkMinutes=60] [maxPlies=40] [minGames=10] [maxPendingBacklog=100000]');
   process.exit(1);
 }
 
@@ -224,9 +243,9 @@ function reportProgress() {
   log(`${totalGamesProcessed} games total (+${gamesThisChunk} this run so far), ${rateGamesPerS.toFixed(0)} games/s${etaStr}`);
 }
 
-async function checkpointAndScore() {
+async function checkpointAndScore(deadlineMs) {
   const t = Date.now();
-  const nodes = await builder.finish(); // safe to call repeatedly -- see streaming-engine.mjs's doc comment
+  const nodes = await builder.finish({ deadlineMs }); // safe to call repeatedly -- see streaming-engine.mjs's doc comment; deadlineMs bounds how long reconciliation gets before this checkpoint is written anyway
   const pendingSnapshot = builder.getPendingSnapshot(); // every still-parked game, so a resume loses none of them
   writeAtomic(nodesPath, JSON.stringify(serializeNodes(nodes)));
   writeAtomic(pendingPath, JSON.stringify(pendingSnapshot));
@@ -253,15 +272,23 @@ async function checkpointAndScore() {
   log(`Checkpoint: ${nodes.size} nodes (${qualifying} qualifying), ${pendingSnapshot.records.length} games still in flight, white picks ${whiteRepertoire.myMove?.san ?? 'nothing yet'} (${((whiteRepertoire.myMove?.score ?? 0) * 100).toFixed(1)}%), root total ${rootNode?.total ?? 0} games -- saved in ${Date.now() - t}ms`);
 }
 
-log(`Starting: chunkMinutes=${chunkMinutes} maxPlies=${maxPlies} minGames=${minGames}`);
+log(`Starting: chunkMinutes=${chunkMinutes} maxPlies=${maxPlies} minGames=${minGames} maxPendingBacklog=${maxPendingBacklog}`);
+
+// Checked every 1000 games fed, not every single one -- getActivePendingCount()
+// is O(1) but at ~1500 games/s even a cheap check adds up if run per-game;
+// a 1000-game granularity is still far finer than needed against an hour-scale cadence.
+const BACKLOG_CHECK_INTERVAL = 1000;
 
 for await (const game of source) {
   builder.feedGame(game);
   totalGamesProcessed++;
   gamesThisChunk++;
-  if (Date.now() - chunkStart >= chunkMs) {
+  const timeUp = Date.now() - chunkStart >= chunkMs;
+  const backlogFull = !timeUp && gamesThisChunk % BACKLOG_CHECK_INTERVAL === 0 && builder.getActivePendingCount() >= maxPendingBacklog;
+  if (timeUp || backlogFull) {
+    if (backlogFull) log(`Pending backlog reached ${maxPendingBacklog} -- pausing to reconcile before it grows further, rather than waiting out the rest of this chunk's ${chunkMinutes}min.`);
     reportProgress();
-    await checkpointAndScore();
+    await checkpointAndScore(chunkStart + chunkMs);
     chunkStart = Date.now();
     gamesThisChunk = 0;
   }
@@ -269,5 +296,5 @@ for await (const game of source) {
 
 log(`Stream exhausted (${parseStats.skipped ?? 0} games skipped as unfinished across the whole run) -- final checkpoint:`);
 reportProgress();
-await checkpointAndScore();
+await checkpointAndScore(); // no deadline -- nothing left to feed, so let this one run to full convergence
 log('Done.');
