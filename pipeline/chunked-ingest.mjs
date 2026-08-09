@@ -185,7 +185,24 @@ async function* skipAlreadyProcessed(source, skipCount) {
 const source = gamesAlreadyProcessed > 0 ? skipAlreadyProcessed(rawSource, gamesAlreadyProcessed) : rawSource;
 
 // --- Build, checkpointing every chunkMinutes ---
-const builder = createStreamingGraphBuilder({ maxPlies, minGames, fetchGamesBatch, initialNodes: initialNodes ?? undefined, initialPending: initialPending ?? undefined });
+// onRound/onFetch: reconciliation (builder.finish(), called from
+// checkpointAndScore() below) can run for a long time on a real
+// month-scale dataset's cold-start backlog, entirely inside network awaits
+// that would otherwise produce zero log output -- indistinguishable from a
+// hang from the outside. onFetch is throttled (every 20th chunk, not
+// every one) since a single round can involve thousands of them.
+let lastFetchLogAt = 0;
+const builder = createStreamingGraphBuilder({
+  maxPlies, minGames, fetchGamesBatch,
+  initialNodes: initialNodes ?? undefined, initialPending: initialPending ?? undefined,
+  onRound: (s) => log(`  reconcile round ${s.round}: ${s.toRegister} record(s) to register, ${s.fetched} game(s) to fetch, queue ${s.queueLength}`),
+  onFetch: (s) => {
+    if (s.completed === s.total || s.completed - lastFetchLogAt >= 20) {
+      lastFetchLogAt = s.completed;
+      log(`    [${s.phase}] fetched ${s.completed}/${s.total} batches`);
+    }
+  },
+});
 let totalGamesProcessed = gamesAlreadyProcessed;
 let gamesThisChunk = 0;
 const runStart = Date.now();

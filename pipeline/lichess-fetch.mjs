@@ -102,12 +102,17 @@ async function fetchChunkWithRetry(chunk, out) {
 
 /**
  * @param {string[]} gameIds
+ * @param {{onChunkDone?: ({completed: number, total: number}) => void}} [opts]
+ *   onChunkDone fires after each 300-id chunk resolves -- a single call here
+ *   can involve thousands of chunks on a real month-scale reconciliation
+ *   round, silently, for many minutes, with no other way for a caller to
+ *   tell "still working" apart from "stuck".
  * @returns {Promise<Map<string, {result: string, moves: string[]}>>}
  *   Games Lichess doesn't return (unknown id) are simply absent from the
  *   map -- callers (streaming-engine.mjs) treat a missing id as an error
  *   rather than silently continuing.
  */
-export async function fetchGamesBatch(gameIds) {
+export async function fetchGamesBatch(gameIds, opts = {}) {
   const out = new Map();
   const chunks = [];
   for (let i = 0; i < gameIds.length; i += MAX_IDS_PER_REQUEST) chunks.push(gameIds.slice(i, i + MAX_IDS_PER_REQUEST));
@@ -116,12 +121,15 @@ export async function fetchGamesBatch(gameIds) {
   // potentially hundreds of chunks in one call (a real month's
   // reconciliation round), launching them all at once would open far more
   // simultaneous connections than CONCURRENCY intends to allow.
+  let completed = 0;
   let nextChunk = 0;
   async function worker() {
     for (;;) {
       const i = nextChunk++;
       if (i >= chunks.length) return;
       await fetchChunkWithRetry(chunks[i], out);
+      completed++;
+      opts.onChunkDone?.({ completed, total: chunks.length });
     }
   }
   await Promise.all(Array.from({ length: Math.min(CONCURRENCY, chunks.length) }, worker));

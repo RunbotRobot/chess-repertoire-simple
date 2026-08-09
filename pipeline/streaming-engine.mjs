@@ -65,11 +65,15 @@ function tallyResult(node, result) {
 }
 
 /**
- * @param {{maxPlies?: number, minGames?: number, fetchGamesBatch: (gameIds: string[]) => Promise<Map<string,{result:string,moves:string[]}>>, initialNodes?: Map, initialPending?: object}} opts
+ * @param {{maxPlies?: number, minGames?: number, fetchGamesBatch: (gameIds: string[]) => Promise<Map<string,{result:string,moves:string[]}>>, initialNodes?: Map, initialPending?: object, onRound?: (stats:{round:number,toRegister:number,fetched:number,queueLength:number}) => void, onFetch?: (stats:{completed:number,total:number,phase:'register'|'drain'}) => void}} opts
  *   fetchGamesBatch is required -- given a list of Lichess game ids,
  *   resolve every one of them (throwing if any is missing from the
  *   result, rather than silently skipping, so a fetch failure surfaces
  *   loudly instead of quietly losing a game).
+ *   onRound/onFetch are both optional, purely-observational progress hooks
+ *   into finish() -- a single call can run for a long time on a real
+ *   month-scale cold-start backlog, entirely inside network awaits a
+ *   caller otherwise has no visibility into.
  * @returns {{feedGame: (game:{id:string,result:string,moves:string[]}) => void, finish: () => Promise<Map>, getPendingSnapshot: () => object}}
  */
 export function createStreamingGraphBuilder(opts) {
@@ -265,7 +269,9 @@ export function createStreamingGraphBuilder(opts) {
       }
       if (deferred.length === 0) break;
       const missingIds = [...new Set(deferred.map((item) => (item.kind === 'advance' ? item.gameId : item.record.gameId)))];
-      const fetched = await fetchGamesBatch(missingIds);
+      const fetched = await fetchGamesBatch(missingIds, {
+        onChunkDone: (p) => opts.onFetch?.({ ...p, phase: 'drain' }),
+      });
       for (const id of missingIds) {
         if (!fetched.has(id)) throw new Error(`fetchGamesBatch did not return game ${id} -- cannot resume a record without it`);
         movesCache.set(id, fetched.get(id));
@@ -300,10 +306,14 @@ export function createStreamingGraphBuilder(opts) {
       }
       if (needRegistration.length === 0 && queueHead >= queue.length) break;
 
+      let fetchCount = 0;
       if (needRegistration.length > 0) {
         const neededIds = [...new Set(needRegistration.map((r) => r.gameId))].filter((id) => !movesCache.has(id));
+        fetchCount = neededIds.length;
         if (neededIds.length > 0) {
-          const fetched = await fetchGamesBatch(neededIds);
+          const fetched = await fetchGamesBatch(neededIds, {
+            onChunkDone: (p) => opts.onFetch?.({ ...p, phase: 'register' }),
+          });
           for (const id of neededIds) {
             if (!fetched.has(id)) throw new Error(`fetchGamesBatch did not return game ${id} -- cannot register its transposition chain without it`);
             movesCache.set(id, fetched.get(id));
@@ -313,6 +323,14 @@ export function createStreamingGraphBuilder(opts) {
           if (!record.consumed) registerChain(record, movesCache);
         }
       }
+      // Reconciliation on a real month-scale dataset can run long enough
+      // (a large one-time backlog on a cold start) that silence here reads
+      // indistinguishably from a hang -- this is otherwise the only place
+      // in the whole builder that can report "still working, here's how
+      // much" while a finish() call is in flight, since feedGame() itself
+      // never awaits anything and callers can't see inside a single finish()
+      // call any other way.
+      opts.onRound?.({ round, toRegister: needRegistration.length, fetched: fetchCount, queueLength: queue.length - queueHead });
       await drainQueue(movesCache);
     }
     return nodes;

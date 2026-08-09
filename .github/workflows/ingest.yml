@@ -133,6 +133,38 @@ jobs:
             fi
           }
 
+          # Pushes just progress.log, on its own, every poll -- separate from
+          # push_checkpoint's full bundle (which only fires when a whole
+          # checkpoint actually lands). chunked-ingest.mjs's log() appends
+          # to this file synchronously throughout the run, including now
+          # from inside a long-running finish() call (see streaming-engine.
+          # mjs's onRound/onFetch hooks) -- pushing it eagerly is the only
+          # way to see live signs of life during a long reconciliation,
+          # rather than only finding out what happened after the fact.
+          LAST_LOG_SIZE=""
+          push_progress_log() {
+            [ -f ckpt/progress.log ] || return 0
+            CUR_SIZE=$(stat -c %s ckpt/progress.log 2>/dev/null || echo "")
+            [ "$CUR_SIZE" = "$LAST_LOG_SIZE" ] && return 0
+            LAST_LOG_SIZE="$CUR_SIZE"
+            rm -rf log_push && mkdir log_push && cp ckpt/progress.log log_push/
+            (
+              cd log_push
+              git init -q
+              git checkout -q -b ingest-checkpoint
+              git config user.name "github-actions[bot]"
+              git config user.email "github-actions[bot]@users.noreply.github.com"
+              git add progress.log
+              git commit -q -m "Progress log $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+              git remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+              # Only the log, not the full checkpoint state -- if a real
+              # checkpoint push raced with this, this must never clobber it.
+              # Both are single-commit force-pushes to the same disposable
+              # branch, so lose the race gracefully rather than fight it.
+              git push -q --force origin ingest-checkpoint || echo "progress.log push skipped (lost race with a real checkpoint push, harmless)"
+            )
+          }
+
           timeout 5.5h node repo/pipeline/chunked-ingest.mjs \
             "$DUMP_URL" \
             "$GITHUB_WORKSPACE/ckpt" \
@@ -142,6 +174,7 @@ jobs:
           LAST=""
           while kill -0 "$INGEST_PID" 2>/dev/null; do
             sleep 300
+            push_progress_log
             if [ -f ckpt/nodes.json ]; then
               CUR=$(stat -c %Y ckpt/nodes.json 2>/dev/null || echo "")
               if [ -n "$CUR" ] && [ "$CUR" != "$LAST" ]; then
