@@ -1,0 +1,134 @@
+name: Ingest Lichess repertoire data
+
+# Runs pipeline/chunked-ingest.mjs against a real Lichess monthly dump.
+# GitHub-hosted runners are free with no minute cap on a public repo (this
+# one), but a single job is hard-capped at 6h -- so this relays itself
+# across runs rather than trying to finish in one shot:
+#   1. Restore whatever internal checkpoint state (nodes.json/pending.json/
+#      meta.json) the last run left behind, from the ingest-checkpoint
+#      branch (a single force-pushed commit, not an accumulating history --
+#      it's disposable working state, not something worth keeping old
+#      versions of).
+#   2. Run the ingestion for up to 5.5h, well under the 6h job limit, so
+#      there's always time left to commit before the job gets killed.
+#   3. Push the internal checkpoint state back to ingest-checkpoint (so the
+#      *next* run can resume), and push the small, actually-useful output
+#      -- repertoire-white.json/repertoire-black.json -- to data/ on main,
+#      which is what the app itself reads.
+# The schedule interval (6h) matches the job cap so runs never overlap in
+# steady state; the concurrency group is a backstop against that anyway.
+on:
+  workflow_dispatch:
+    inputs:
+      chunkMinutes:
+        description: 'Internal checkpoint interval in minutes (within one job run)'
+        default: '20'
+      maxPlies:
+        description: 'Max depth in half-moves'
+        default: '40'
+      minGames:
+        description: 'Minimum games for a position to qualify'
+        default: '10'
+  schedule:
+    - cron: '0 */6 * * *'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ingest
+  cancel-in-progress: false
+
+env:
+  DUMP_URL: https://database.lichess.org/standard/lichess_db_standard_rated_2026-07.pgn.zst
+  CHUNK_MINUTES: ${{ github.event.inputs.chunkMinutes || '20' }}
+  MAX_PLIES: ${{ github.event.inputs.maxPlies || '40' }}
+  MIN_GAMES: ${{ github.event.inputs.minGames || '10' }}
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+        with:
+          path: repo
+          fetch-depth: 1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install zstd
+        run: sudo apt-get update -y && sudo apt-get install -y zstd
+
+      - name: Restore checkpoint state from ingest-checkpoint branch, if any
+        run: |
+          mkdir -p ckpt
+          if git -C repo fetch origin ingest-checkpoint 2>/dev/null; then
+            git -C repo archive origin/ingest-checkpoint | tar -x -C ckpt
+            echo "Restored checkpoint: $(ls -la ckpt)"
+          else
+            echo "No ingest-checkpoint branch yet -- starting fresh."
+          fi
+
+      - name: Disk space before ingesting
+        run: df -h /
+
+      - name: Run ingestion (bounded well under the 6h job limit)
+        run: |
+          cd repo
+          set +e
+          timeout 5.5h node pipeline/chunked-ingest.mjs \
+            "$DUMP_URL" \
+            "$GITHUB_WORKSPACE/ckpt" \
+            "$CHUNK_MINUTES" "$MAX_PLIES" "$MIN_GAMES"
+          code=$?
+          # 124 = timeout hit the 5.5h bound, which is expected and fine --
+          # chunked-ingest.mjs's own periodic checkpointing already saved
+          # progress; anything else is a real failure worth surfacing.
+          if [ "$code" -ne 0 ] && [ "$code" -ne 124 ]; then
+            echo "chunked-ingest.mjs exited with unexpected code $code"
+            exit "$code"
+          fi
+          exit 0
+
+      - name: Disk space after ingesting
+        if: always()
+        run: df -h / && du -sh ckpt/* 2>/dev/null
+
+      - name: Push checkpoint state to ingest-checkpoint (single commit, no history growth)
+        if: always()
+        run: |
+          cd ckpt
+          [ -f nodes.json ] || { echo "No checkpoint produced this run -- nothing to push."; exit 0; }
+          git init -q
+          git checkout -q -b ingest-checkpoint
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add nodes.json pending.json meta.json progress.log
+          git commit -q -m "Checkpoint state $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          git remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push -q --force origin ingest-checkpoint
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish repertoire data to the app (data/ on main)
+        if: always()
+        run: |
+          [ -f ckpt/repertoire-white.json ] || { echo "No repertoire output this run -- nothing to publish."; exit 0; }
+          mkdir -p repo/data
+          cp ckpt/repertoire-white.json ckpt/repertoire-black.json repo/data/
+          cd repo
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/repertoire-white.json data/repertoire-black.json
+          if ! git diff --cached --quiet; then
+            WHITE_PICK=$(node -e "const d=require('./data/repertoire-white.json');console.log((d.root.myMove?.san||'?')+' '+d.root.total+'g')")
+            git commit -q -m "Update repertoire checkpoint data ($(date -u +%Y-%m-%dT%H:%M:%SZ), white picks ${WHITE_PICK})"
+            git push -q origin main
+          else
+            echo "Repertoire data unchanged -- nothing to commit."
+          fi
