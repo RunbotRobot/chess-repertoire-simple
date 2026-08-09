@@ -122,7 +122,17 @@ function parseMoveText(line) {
     // A move-number and the move itself can appear glued together
     // ("12.Nf3") in some PGN styles, though not in the Lichess dumps
     // sampled so far — strip a leading number+dots defensively either way.
-    moves.push(tok.replace(/^\d+\.(\.\.)?/, ''));
+    // Real dumps do include inline move-quality annotations (!, ?, !?, ?!,
+    // !!, ??) on some moves -- SAN itself never legitimately ends in ! or ?
+    // (only +, #, or a promotion/piece letter can end a real move), so
+    // stripping any trailing run of them is always safe. Without this, the
+    // same physical move gets treated as a different graph edge purely
+    // because one game's copy happened to carry an annotation and
+    // another's didn't ("g4" vs "g4?!" for the identical g2g4) -- silently
+    // fragmenting that move's game count and score across multiple
+    // children instead of merging them, and separately breaking quiz.js's
+    // exact-SAN match against a move the player actually got right.
+    moves.push(tok.replace(/^\d+\.(\.\.)?/, '').replace(/[!?]+$/, ''));
   }
   return moves;
 }
