@@ -25,7 +25,7 @@ on:
     inputs:
       chunkMinutes:
         description: 'Internal checkpoint interval in minutes (within one job run)'
-        default: '20'
+        default: '5'
       maxPlies:
         description: 'Max depth in half-moves'
         default: '40'
@@ -44,7 +44,17 @@ concurrency:
 
 env:
   DUMP_URL: https://database.lichess.org/standard/lichess_db_standard_rated_2026-07.pgn.zst
-  CHUNK_MINUTES: ${{ github.event.inputs.chunkMinutes || '20' }}
+  # 5, not the more obvious 20-60: the FIRST checkpoint in any run is
+  # uniquely expensive (unlike every later one -- see streaming-engine.mjs's
+  # finish() doc comment on registerChain only ever running once per
+  # record), since it has to reconcile the ENTIRE backlog of games parked
+  # since the process started, all at once, over the live Lichess API. A
+  # 20-minute window let that first backlog grow large enough, on a real
+  # month-scale dataset, that reconciling it alone ran past 80+ minutes with
+  # nothing to show for it. A short window bounds how big that one-time
+  # backlog can ever get, for every run (not just the very first) since a
+  # crash/restart re-creates the same "cold start" condition.
+  CHUNK_MINUTES: ${{ github.event.inputs.chunkMinutes || '5' }}
   MAX_PLIES: ${{ github.event.inputs.maxPlies || '40' }}
   MIN_GAMES: ${{ github.event.inputs.minGames || '10' }}
 
