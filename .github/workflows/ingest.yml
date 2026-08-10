@@ -113,6 +113,20 @@ jobs:
           # commit rather than accumulating history) to ingest-checkpoint,
           # and the small, actually-useful repertoire-{white,black}.json to
           # data/ on main, which is what the app reads.
+          #
+          # Every git operation below is guarded with `|| echo ...` rather
+          # than left to this script's default errexit (GitHub Actions runs
+          # `run:` steps with `bash -e`) -- this function is called from
+          # inside the live polling loop further down, NOT just at the very
+          # end, so an unguarded failure here doesn't just lose one push, it
+          # kills the entire multi-hour job outright, including the still-
+          # healthy node process underneath it. That's exactly what happened
+          # in production: main's repertoire-*.json grew past GitHub's
+          # 100MB file limit, the push was rejected, and the whole job died
+          # silently for over an hour with nothing to restart it. A rejected
+          # push is real signal (surfaced via the echo) but must never be
+          # allowed to take down the run -- the next checkpoint gets another
+          # chance regardless of why the previous one failed.
           push_checkpoint() {
             if [ -f ckpt/nodes.json ]; then
               rm -rf ckpt_push && cp -r ckpt ckpt_push
@@ -126,7 +140,7 @@ jobs:
                 git commit -q -m "Checkpoint state $(date -u +%Y-%m-%dT%H:%M:%SZ)"
                 git remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
                 git push -q --force origin ingest-checkpoint
-              )
+              ) || echo "Checkpoint state push failed -- will retry at the next checkpoint, not fatal to the run."
             fi
             if [ -f ckpt/repertoire-white.json ]; then
               mkdir -p repo/data
@@ -140,7 +154,7 @@ jobs:
                   git pull -q --rebase origin main
                   git push -q origin main
                 fi
-              )
+              ) || echo "Repertoire data push to main failed -- will retry at the next checkpoint, not fatal to the run."
             fi
           }
 

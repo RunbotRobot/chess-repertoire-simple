@@ -710,18 +710,25 @@ export function selectRepertoire(graph, scores, color, minGames, rootFen) {
       }
       if (best) {
         base.myMove = { san: best.edge.san, uci: best.edge.uci, score: best.s, child: build(best.edge.key) };
-        // Other qualifying candidates at this same decision point — this
-        // pass still only ever FOLLOWS the single best one (a repertoire
-        // has one prepared line per position), but each alternate also
-        // gets its own recursively-built child, exactly like a qualifying
-        // opponent reply does below. Without that, Browse dead-ends the
-        // instant a curious click strays off the chosen line, even though
-        // the underlying graph has real data there — the whole subtree a
-        // move like this scored from becomes literally unreachable, not
-        // just deprioritized.
+        // Other qualifying candidates at this same decision point, not
+        // themselves recursed into (this pass only ever follows the single
+        // best one) — kept here purely for Browse/UI reference, the same
+        // role explorer.js's live-API alternates play.
+        //
+        // A prior version of this also attached a fully recursed `child`
+        // to every alternate, matching how a qualifying opponent reply
+        // already works below, specifically so Browse could follow a
+        // non-chosen move down to its real leaf. In practice that
+        // serialized nearly the entire qualifying graph as a tree (a
+        // popular, deep-branching alternate like 1.e4 pulls in thousands
+        // of nodes) — real production data hit ~105MB per color, over
+        // GitHub's 100MB per-file limit, which broke every push until
+        // reverted here. Revisit this as a properly bounded feature (a
+        // depth/size cap, or fetching a non-repertoire branch's subtree
+        // lazily on demand) rather than unconditional full recursion.
         base.alternates = scored
           .filter((c) => c !== best)
-          .map((c) => ({ san: c.edge.san, uci: c.edge.uci, score: c.s, games: c.child.total, child: build(c.edge.key) }))
+          .map((c) => ({ san: c.edge.san, uci: c.edge.uci, score: c.s, games: c.child.total }))
           .sort((a, b) => b.score - a.score);
       }
     } else {
@@ -747,7 +754,7 @@ every .child):
   {
     fen, sideToMove, total, whiteWins, draws, blackWins, score,
     myMove: { san, uci, score, child: RepertoireNode } | null,   // set only at the builder's own decision points that had a qualifying move
-    alternates: [{ san, uci, score, games, child: RepertoireNode }] | null,   // other qualifying candidates at that same decision point — not the repertoire's chosen line (only myMove is), but each still carries its own fully recursed subtree so Browse can follow it; set only alongside myMove, sorted by score desc
+    alternates: [{ san, uci, score, games }] | null,   // other qualifying candidates at that same decision point, not followed further (reference only) -- see the comment above this shape's build() for why this is deliberately NOT a full recursive child; set only alongside myMove, sorted by score desc
     replies: [{ san, uci, games, share, child: RepertoireNode }] | null,  // set only at the opponent's decision points, sorted by games desc
   }
 Exactly one of myMove/replies is non-null at any node with a qualifying
