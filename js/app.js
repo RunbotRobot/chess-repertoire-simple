@@ -15,7 +15,7 @@ import { Chess } from './vendor/chess.esm.js';
 // devtools is actually running the latest code, and it also drives the
 // service worker's cache name (see sw.js) so updates actually take effect
 // instead of being served stale from the offline cache.
-export const APP_VERSION = 44;
+export const APP_VERSION = 45;
 
 const COLOR_OPTIONS = ['white', 'black'];
 const RATING_OPTIONS = ['1000', '1200', '1400', '1600', '1800', '2000', '2200', '2500'];
@@ -376,43 +376,108 @@ function gamesTotalHint(games) {
   const div = document.createElement('div');
   div.className = 'hint';
   div.style.marginBottom = '6px';
-  div.textContent = `${games} games at this position`;
+  div.textContent = `${games.toLocaleString()} games at this position`;
   return div;
 }
 
-function fmtPct(x) { return `${Math.round((x || 0) * 100)}%`; }
+// Magnitude labels for the fraction-mode denominator (formatStat below) --
+// biggest first, so the loop picks the largest suffix that still divides
+// evenly into a whole coefficient (e.g. exponent 5 -> "100k", not "0.1M").
+const MAGNITUDE_SUFFIXES = [[12, 'T'], [9, 'B'], [6, 'M'], [3, 'k']];
+function magnitudeDenominator(exp) {
+  for (const [groupExp, suffix] of MAGNITUDE_SUFFIXES) {
+    if (exp >= groupExp) return `${Math.pow(10, exp - groupExp)}${suffix}`;
+  }
+  return `${Math.pow(10, exp)}`;
+}
+
+// Formats a 0..1 fraction as a percentage with 2 significant figures --
+// e.g. "50%", "5.2%", "0.52%" -- or, once that would need more than 3
+// digits after the decimal point (the value is under 0.1%), as a stacked
+// "numerator / power-of-10 denominator" fraction instead (e.g. 12/100k
+// for 0.012%, i.e. 0.00012), so a genuinely rare move doesn't print as a
+// wall of leading zeros. Returns an HTML string (safe: every input here is
+// a number computed by this app, never user- or network-supplied text).
+function formatStat(x) {
+  const pct = (x || 0) * 100;
+  if (pct === 0) return '0%';
+  if (pct >= 0.1) {
+    const decimals = Math.max(0, 1 - Math.floor(Math.log10(pct)));
+    return `${pct.toFixed(decimals)}%`;
+  }
+  const frac = x || 0;
+  let mag = Math.floor(Math.log10(frac));
+  let numerator = Math.round(frac / Math.pow(10, mag - 1));
+  if (numerator >= 100) { numerator = Math.round(numerator / 10); mag += 1; } // rounding pushed it to 3 digits (e.g. 99.6 -> 100) -- bump the exponent instead
+  const denominator = magnitudeDenominator(-(mag - 1));
+  return `<span class="frac"><span class="num">${numerator}</span><span class="den">${denominator}</span></span>`;
+}
+
+// Sortable-header state for Browse's move table, module-level so a sort
+// choice persists across navigating to a different position (matches
+// spreadsheet expectations -- once you ask for highest-score-first, you
+// want that consistently, not reset on every click). 'san' defaults
+// ascending (A-Z reads naturally); every stat column defaults descending
+// (highest/most-relevant first) the first time it's clicked; clicking the
+// SAME header again flips direction.
+const SORT_FIELDS = ['san', 'score', 'winRate', 'drawRate', 'lossRate', 'share'];
+const SORT_HEADER_LABELS = { san: 'Move', score: 'Score', winRate: 'Win', drawRate: 'Draw', lossRate: 'Loss', share: 'Freq' };
+let browseSortField = null;
+let browseSortAsc = false;
+
+function handleMoveTableHeaderClick(field) {
+  if (browseSortField === field) browseSortAsc = !browseSortAsc;
+  else { browseSortField = field; browseSortAsc = field === 'san'; }
+  renderBrowse();
+}
+
+function sortMoveEntries(entries) {
+  if (!browseSortField) return entries;
+  const field = browseSortField;
+  const dir = browseSortAsc ? 1 : -1;
+  return [...entries].sort((a, b) => (field === 'san' ? dir * a.san.localeCompare(b.san) : dir * (a[field] - b[field])));
+}
 
 // One table for either side of a decision point (my move + alternates, or
 // the opponent's replies) — same column set either way (score, the raw
 // win/draw/loss breakdown, and how often the move is actually played),
 // backed by explorer.js's/repertoireSource.js's shared moveStats/moveEntry
-// shape. A sticky header (see index.html's .movetable CSS) means the
-// column labels don't need repeating inline on every row — the per-row
-// game count is deliberately omitted too (share/score already convey what
-// matters; the total game count for the whole position is shown once,
-// above the table, via gamesTotalHint) — both to keep rows compact on a
-// narrow phone screen. chosenUci marks the repertoire's actual pick (my
-// decision points only — the opponent has no "chosen" move, every kept
-// reply is equally real).
+// shape. A sticky, clickable header (see index.html's .movetable CSS)
+// means the column labels don't need repeating inline on every row and
+// double as the sort control — the per-row game count is deliberately
+// omitted too (share/score already convey what matters; the total game
+// count for the whole position is shown once, above the table, via
+// gamesTotalHint) — both to keep rows compact on a narrow phone screen.
+// chosenUci marks the repertoire's actual pick (my decision points only —
+// the opponent has no "chosen" move, every kept reply is equally real).
 function buildMoveTable(entries, { chosenUci } = {}) {
   const wrap = document.createElement('div');
   wrap.className = 'movetable-wrap';
   const table = document.createElement('table');
   table.className = 'movetable';
-  table.innerHTML = `
-    <colgroup>
-      <col class="col-move"><col class="col-stat"><col class="col-stat">
-      <col class="col-stat"><col class="col-stat"><col class="col-stat">
-    </colgroup>
-    <thead><tr>
-      <th>Move</th><th>Score</th><th>Win</th><th>Draw</th><th>Loss</th><th>Freq</th>
-    </tr></thead>`;
+  table.innerHTML = `<colgroup>
+    <col class="col-move"><col class="col-stat"><col class="col-stat">
+    <col class="col-stat"><col class="col-stat"><col class="col-stat">
+  </colgroup>`;
+
+  const thead = document.createElement('thead');
+  const headRow = document.createElement('tr');
+  for (const field of SORT_FIELDS) {
+    const th = document.createElement('th');
+    const arrow = browseSortField === field ? (browseSortAsc ? ' ▲' : ' ▼') : '';
+    th.textContent = SORT_HEADER_LABELS[field] + arrow;
+    th.addEventListener('click', () => handleMoveTableHeaderClick(field));
+    headRow.appendChild(th);
+  }
+  thead.appendChild(headRow);
+  table.appendChild(thead);
+
   const tbody = document.createElement('tbody');
-  for (const m of entries) {
+  for (const m of sortMoveEntries(entries)) {
     const tr = document.createElement('tr');
     if (chosenUci) tr.className = m.uci === chosenUci ? 'chosen' : 'alt';
-    tr.innerHTML = `<td>${m.san}</td><td>${fmtPct(m.score)}</td><td>${fmtPct(m.winRate)}</td>` +
-      `<td>${fmtPct(m.drawRate)}</td><td>${fmtPct(m.lossRate)}</td><td>${fmtPct(m.share)}</td>`;
+    tr.innerHTML = `<td>${m.san}</td><td>${formatStat(m.score)}</td><td>${formatStat(m.winRate)}</td>` +
+      `<td>${formatStat(m.drawRate)}</td><td>${formatStat(m.lossRate)}</td><td>${formatStat(m.share)}</td>`;
     tr.addEventListener('click', () => { browsePath = [...browsePath, m]; browseSelectedSquare = null; renderBrowse(); });
     tbody.appendChild(tr);
   }

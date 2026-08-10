@@ -135,7 +135,15 @@ export function createStreamingGraphBuilder(opts) {
     if (!move) throw new Error(`illegal move "${san}" in game ${gameId} at ply ${plyIndex}`);
     const uci = move.from + move.to + (move.promotion || '');
     const toNode = getOrCreate(chess.fen());
-    if (!fromNode.children.has(san)) fromNode.children.set(san, { san, uci, key: toNode.key });
+    // edge.games counts games that took THIS edge from THIS parent —
+    // deliberately separate from toNode.total, which (via transposition
+    // merging) can include games that reached the same position from a
+    // different parent entirely. See algorithm.js's applyOneMove for the
+    // real displayed-frequency bug this fixes. `|| 0` guards resuming a
+    // checkpoint written before this field existed.
+    let edge = fromNode.children.get(san);
+    if (!edge) { edge = { san, uci, key: toNode.key, games: 0 }; fromNode.children.set(san, edge); }
+    edge.games = (edge.games || 0) + 1;
     tallyResult(toNode, result);
     return toNode;
   }

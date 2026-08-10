@@ -125,7 +125,11 @@ export function positionKey(fen) {
  *   walked past it.
  * @returns {Map<string, PositionNode>} keyed by positionKey(fen), where
  *   PositionNode = { fen, key, total, whiteWins, draws, blackWins,
- *   children: Map<san, {san, uci, key}> }
+ *   children: Map<san, {san, uci, key, games}> } — edge.games is how many
+ *   games took THIS specific edge from THIS specific parent, which is NOT
+ *   the same thing as the child node's own .total (a transposition can
+ *   make .total larger, since it also counts games that reached the same
+ *   position via a different parent entirely)
  */
 export function buildPositionGraph(games, opts = {}) {
   const builder = createGraphBuilder(opts);
@@ -292,8 +296,19 @@ export function createGraphBuilder(opts) {
     // A single parent can only reach a given child via one specific move
     // (different moves from the same position always produce different
     // FENs), so san is a safe, stable key for the children map even
-    // though it's not globally unique across positions.
-    if (!fromNode.children.has(san)) fromNode.children.set(san, { san, uci, key: toNode.key });
+    // though it's not globally unique across positions. edge.games counts
+    // EVERY game that actually took this specific edge from THIS parent —
+    // deliberately separate from toNode.total, which (via transposition
+    // merging) can include games that reached the same position from a
+    // totally different parent. Conflating the two is exactly what caused
+    // a real displayed-frequency bug (a move's "share" computed as
+    // toNode.total / fromNode.total came out over 100%, because toNode's
+    // total included traffic from other parents entirely). `|| 0` guards
+    // against resuming a checkpoint written before this field existed —
+    // an edge missing .games entirely, not just at 0.
+    let edge = fromNode.children.get(san);
+    if (!edge) { edge = { san, uci, key: toNode.key, games: 0 }; fromNode.children.set(san, edge); }
+    edge.games = (edge.games || 0) + 1;
     tallyResult(toNode, game.result);
     maybeResolve(toNode.key);
     return toNode;
@@ -719,6 +734,53 @@ export function selectRepertoire(graph, scores, color, minGames, rootFen) {
   return build(rootKey);
 }
 
+// Walks forward from `startKey` via the SAME minimax rule scorePass used to
+// produce `scores` — argmax at `color`'s own decision points, argmin at the
+// opponent's (their best defense, "not letting me win, even if that simply
+// means drawing") — until reaching an actual leaf (no qualifying child),
+// and returns that leaf's raw tally. This is deliberately NOT the same
+// thing as a node's own immediate tally: a candidate move's real strength
+// is determined by how the game continues under best play from both
+// sides, not by averaging over every game that ever reached the resulting
+// position (the overwhelming majority of which involve a mistake
+// somewhere further down, on one side or the other, that scorePass's own
+// minimax has already effectively discounted). Concretely: after 1.e4 f6
+// (a bad reply), White's forced-mate-in-a-few continuation crushes it —
+// but the raw tally of "every game that ever reached 1.e4 f6" is
+// dominated by amateur games that never found that continuation, showing
+// a deceptively modest win rate. The leaf this function resolves to is
+// the SAME leaf whose tally already determines the position's propagated
+// .score (scorePass and this function share the exact tie-break rule —
+// first-encountered wins strict >/< — so they can never disagree about
+// which child is "best"); this just also exposes that leaf's raw
+// win/draw/loss breakdown, not only the Wilson-adjusted number. `memo` is
+// shared across an entire selectRepertoireGraph call so a leaf reachable
+// from many different starting positions is only walked to once.
+function resolveLeafTally(graph, scores, minGames, color, startKey, memo) {
+  if (memo.has(startKey)) return memo.get(startKey);
+  const node = graph.get(startKey);
+  const scored = scores.get(startKey);
+  let result;
+  if (!scored || scored.isLeaf) {
+    result = { total: node.total, whiteWins: node.whiteWins, draws: node.draws, blackWins: node.blackWins };
+  } else {
+    const mover = sideToMove(node.fen);
+    const maximizing = mover === color;
+    let best = null;
+    for (const edge of node.children.values()) {
+      const child = graph.get(edge.key);
+      if (!child || child.total < minGames) continue;
+      const s = scores.get(child.key)?.score ?? leafScore(child, color);
+      if (best === null || (maximizing ? s > best.s : s < best.s)) best = { edge, s };
+    }
+    result = best
+      ? resolveLeafTally(graph, scores, minGames, color, best.edge.key, memo)
+      : { total: node.total, whiteWins: node.whiteWins, draws: node.draws, blackWins: node.blackWins };
+  }
+  memo.set(startKey, result);
+  return result;
+}
+
 /**
  * Same forward selection as selectRepertoire (spec step 8: one followed
  * move at the builder's own decision points, every qualifying reply at the
@@ -751,6 +813,7 @@ export function selectRepertoireGraph(graph, scores, color, minGames, rootFen) {
   const startFen = rootFen || new Chess().fen();
   const rootKey = positionKey(startFen);
   const nodes = {};
+  const leafMemo = new Map(); // shared across the whole call -- see resolveLeafTally
   // Breadth-first over KEYS, not paths -- `queued` guards both the initial
   // enqueue and re-enqueue, so a position reachable via many transposing
   // move orders (only more likely now that own alternates branch too) is
@@ -764,6 +827,7 @@ export function selectRepertoireGraph(graph, scores, color, minGames, rootFen) {
     const node = graph.get(key);
     const scored = scores.get(key);
     const mover = sideToMove(node.fen);
+    const leafTally = resolveLeafTally(graph, scores, minGames, color, key, leafMemo);
     const flat = {
       fen: node.fen,
       sideToMove: mover,
@@ -772,6 +836,16 @@ export function selectRepertoireGraph(graph, scores, color, minGames, rootFen) {
       draws: node.draws,
       blackWins: node.blackWins,
       score: scored ? scored.score : leafScore(node, color),
+      // The tally of the leaf reached by continued optimal play from here
+      // (see resolveLeafTally) -- what Browse's win/draw/loss columns
+      // actually display for a move landing on this node, since node's OWN
+      // total/whiteWins/draws/blackWins above mixes in every game that
+      // ever reached this exact position, most of which diverge from
+      // optimal play somewhere further down.
+      leafTotal: leafTally.total,
+      leafWhiteWins: leafTally.whiteWins,
+      leafDraws: leafTally.draws,
+      leafBlackWins: leafTally.blackWins,
       myMove: null,
       alternates: null,
       replies: null,
@@ -790,10 +864,16 @@ export function selectRepertoireGraph(graph, scores, color, minGames, rootFen) {
         if (best === null || c.s > best.s) best = c;
       }
       if (best) {
-        flat.myMove = { san: best.edge.san, uci: best.edge.uci, score: best.s, childKey: best.edge.key };
+        // games is the EDGE's own count (see applyOneMove's doc comment) --
+        // how many games actually played this move from THIS position, not
+        // the child's own .total, which a transposition can inflate with
+        // games that reached the same position from somewhere else
+        // entirely (the real cause of a move's displayed frequency once
+        // coming out over 100%).
+        flat.myMove = { san: best.edge.san, uci: best.edge.uci, score: best.s, games: best.edge.games, childKey: best.edge.key };
         flat.alternates = scoredCands
           .filter((c) => c !== best)
-          .map((c) => ({ san: c.edge.san, uci: c.edge.uci, score: c.s, games: c.child.total, childKey: c.edge.key }))
+          .map((c) => ({ san: c.edge.san, uci: c.edge.uci, score: c.s, games: c.edge.games, childKey: c.edge.key }))
           .sort((a, b) => b.score - a.score);
         for (const c of scoredCands) {
           if (!queued.has(c.edge.key)) { queued.add(c.edge.key); queue.push(c.edge.key); }
@@ -801,7 +881,7 @@ export function selectRepertoireGraph(graph, scores, color, minGames, rootFen) {
       }
     } else {
       flat.replies = qualifying
-        .map(({ edge, child }) => ({ san: edge.san, uci: edge.uci, games: child.total, share: child.total / node.total, childKey: edge.key }))
+        .map(({ edge, child }) => ({ san: edge.san, uci: edge.uci, games: edge.games, share: edge.games / node.total, childKey: edge.key }))
         .sort((a, b) => b.games - a.games);
       for (const { edge } of qualifying) {
         if (!queued.has(edge.key)) { queued.add(edge.key); queue.push(edge.key); }
@@ -817,9 +897,10 @@ FlatRepertoireNode shape (returned by selectRepertoireGraph, as each value
 in .nodes):
   {
     fen, sideToMove, total, whiteWins, draws, blackWins, score,
-    myMove: { san, uci, score, childKey } | null,   // set only at the builder's own decision points that had a qualifying move; childKey indexes .nodes
+    leafTotal, leafWhiteWins, leafDraws, leafBlackWins,  // the tally of the leaf reached by continued optimal play from THIS node (see resolveLeafTally) -- what a move landing here should show as its win/draw/loss breakdown, NOT total/whiteWins/draws/blackWins above (which mixes in every game that ever reached this exact position, however it was actually played out from here)
+    myMove: { san, uci, score, games, childKey } | null,   // set only at the builder's own decision points that had a qualifying move; games is the EDGE's own count (how many games played this move from HERE), not childKey's node's total; childKey indexes .nodes
     alternates: [{ san, uci, score, games, childKey }] | null,   // EVERY other qualifying candidate at that same decision point (not just a reference -- childKey indexes .nodes, so Browse can follow any of them); set only alongside myMove, sorted by score desc
-    replies: [{ san, uci, games, share, childKey }] | null,  // set only at the opponent's decision points, sorted by games desc
+    replies: [{ san, uci, games, share, childKey }] | null,  // set only at the opponent's decision points, sorted by games desc; games/share are also edge-specific, not the child node's own total
   }
 Exactly one of myMove/replies is non-null at any node with a qualifying
 child; both are null at a leaf. Unlike RepertoireNode below, this is

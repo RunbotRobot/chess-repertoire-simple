@@ -79,31 +79,43 @@ function findNode(nodesByKey, rootKey, uciPath) {
 // Every move entry (myMove, each alternate, each opponent reply) carries
 // the SAME stat shape as explorer.js's live-mode moveStats(), so Browse's
 // move table has one column set regardless of data source or whose
-// decision point it's looking at: score is the resolved child position's
-// own already-computed score (a leaf's Wilson lower bound, or a minimax-
-// propagated score for a non-leaf — see algorithm.js's scorePass), read
-// from the child node itself rather than the edge (a reply edge never
-// carried its own .score — only myMove/alternates edges did — but the
-// CHILD node always has one, since scorePass scores every qualifying
-// position regardless of whose move reached it). winRate/drawRate/lossRate
-// are the raw (unadjusted) breakdown of the child position's own tally,
-// from `color`'s perspective; share is how much of the parent position's
-// total games actually went through this move.
+// decision point it's looking at.
+//
+// games/share come from the EDGE itself (edge.games — how many games
+// actually played THIS move from THIS exact position), not from the
+// resolved child node's own .total. Those are NOT the same thing: the
+// graph merges transpositions by position, so a child reachable from
+// multiple different parents has a .total that's the SUM across all of
+// them — using it as if it were "games that took this one edge" is what
+// produced a real bug where a move's displayed frequency came out over
+// 100%. See algorithm.js's applyOneMove/selectRepertoireGraph.
+//
+// score is the resolved child's own already-computed score (a leaf's
+// Wilson lower bound, or a minimax-propagated score for a non-leaf — see
+// algorithm.js's scorePass). winRate/drawRate/lossRate are the raw
+// (unadjusted) breakdown of the LEAF reached by continued optimal play
+// from the child — not the child's own immediate aggregate tally, which
+// mixes in every game that ever reached that position however it
+// actually continued from there (most of which diverge from optimal play
+// somewhere further down — see algorithm.js's resolveLeafTally for the
+// motivating case: a bad reply that "looks fine" on raw average only
+// because most opponents don't find the punishing continuation).
 function moveEntry(edge, parentTotal, color, nodesByKey) {
   const child = nodesByKey[edge.childKey];
-  const total = child?.total ?? 0;
-  const whiteWins = child?.whiteWins ?? 0;
-  const draws = child?.draws ?? 0;
-  const blackWins = child?.blackWins ?? 0;
-  const wins = color === 'white' ? whiteWins : blackWins;
-  const losses = color === 'white' ? blackWins : whiteWins;
+  const games = edge.games ?? 0;
+  const leafTotal = child?.leafTotal ?? 0;
+  const leafWhiteWins = child?.leafWhiteWins ?? 0;
+  const leafDraws = child?.leafDraws ?? 0;
+  const leafBlackWins = child?.leafBlackWins ?? 0;
+  const wins = color === 'white' ? leafWhiteWins : leafBlackWins;
+  const losses = color === 'white' ? leafBlackWins : leafWhiteWins;
   return {
-    san: edge.san, uci: edge.uci, games: total,
+    san: edge.san, uci: edge.uci, games,
     score: child?.score ?? 0,
-    winRate: total > 0 ? wins / total : 0,
-    drawRate: total > 0 ? draws / total : 0,
-    lossRate: total > 0 ? losses / total : 0,
-    share: parentTotal > 0 ? total / parentTotal : 0,
+    winRate: leafTotal > 0 ? wins / leafTotal : 0,
+    drawRate: leafTotal > 0 ? leafDraws / leafTotal : 0,
+    lossRate: leafTotal > 0 ? losses / leafTotal : 0,
+    share: parentTotal > 0 ? games / parentTotal : 0,
   };
 }
 
