@@ -1,5 +1,5 @@
 import { Chess } from './vendor/chess.esm.js';
-import { recordLineResult } from './storage.js';
+import { recordLineResult, updateStreak } from './storage.js';
 
 export const ABORT = '__quiz_abort__';
 export class QuizAbort extends Error {}
@@ -136,6 +136,7 @@ export class QuizSession {
     await this.handlers.onLineStart?.({ color: this.color });
     const result = await this.runPlaythrough(null);
     recordLineResult(this.color, result.pathId || '(root)', result.missed);
+    result.streak = updateStreak(result.missed);
     await this.handlers.onLineEnd?.(result);
 
     if (result.attemptPath.length > 0 && (result.missed || this.settings.alwaysReplayOnSuccess)) {
@@ -179,8 +180,13 @@ handlers shape:
                                                         correct, same reasoning as onOpponentMove's stats: this is
                                                         about the move that just resolved, not the one now being
                                                         asked about.
-  onLineEnd({missed, attemptPath, leafGames, leafReason, leafWindowInfo}) -> Promise<void>
-                                                        fires once per line (fresh or replay). leafReason (see
+  onLineEnd({missed, attemptPath, leafGames, leafReason, leafWindowInfo, streak}) -> Promise<void>
+                                                        fires once per line, for the fresh attempt only (a replay
+                                                        goes through onReplayStart/onReplayEnd instead — see
+                                                        playNextLine). streak is the persisted count of
+                                                        consecutive clean fresh lines (reset to 0 here if missed,
+                                                        incremented if not), already updated by the time this
+                                                        fires. leafReason (see
                                                         explorer.js's computeNodeFromRaw doc) explains *why* the
                                                         line stopped here rather than continuing — don't assume
                                                         it's always "too few total games," e.g.

@@ -1,4 +1,4 @@
-import { DEFAULT_SETTINGS, loadSettings, saveSettings } from './storage.js';
+import { DEFAULT_SETTINGS, loadSettings, saveSettings, loadStreak } from './storage.js';
 import { getPosition, peekPosition } from './explorer.js';
 import { getLocalPosition, peekLocalPosition, forgetLocalRepertoire, peekLoadedMeta } from './repertoireSource.js';
 import { getCacheStats, clearCache } from './positionCache.js';
@@ -15,7 +15,7 @@ import { Chess } from './vendor/chess.esm.js';
 // devtools is actually running the latest code, and it also drives the
 // service worker's cache name (see sw.js) so updates actually take effect
 // instead of being served stale from the offline cache.
-export const APP_VERSION = 45;
+export const APP_VERSION = 46;
 
 const COLOR_OPTIONS = ['white', 'black'];
 const RATING_OPTIONS = ['1000', '1200', '1400', '1600', '1800', '2000', '2200', '2500'];
@@ -39,6 +39,19 @@ function log(msg) {
   }
   const caption = $('#quiz-caption');
   if (caption) caption.textContent = msg;
+}
+
+// Mirrors the consecutive-clean-lines streak (js/storage.js's
+// loadStreak/updateStreak) into whichever of the three quiz surfaces
+// happens to be present: the Session card (visible whenever a quiz isn't
+// actively running), the manual on-screen quiz panel, and the full-screen
+// voice-quiz overlay (invisible during actual blackout, same as its other
+// text, until peeked -- see index.html's #quiz-live.blackout.peek rules).
+function updateStreakDisplay(streak) {
+  for (const id of ['#quiz-streak', '#manual-streak', '#quiz-live-streak']) {
+    const el = $(id);
+    if (el) el.textContent = `🔥 ${streak}`;
+  }
 }
 
 async function copyTextToClipboard(text) {
@@ -898,15 +911,16 @@ async function startVoiceQuiz(quizMode) {
       await speakGuarded(`Not quite. The move was ${sanSpoken(correctSan)}. Say ready when you want to continue.`);
       await waitForVoiceContinue();
     },
-    onLineEnd: async ({ missed, leafGames, leafReason, leafWindowInfo }) => {
+    onLineEnd: async ({ missed, leafGames, leafReason, leafWindowInfo, streak }) => {
       hideFetchProgress('quiz-fetch-progress');
+      updateStreakDisplay(streak);
       if (missed) return;
       // The window/next-fetch detail is logged (visible in the debug log
       // panel) rather than spoken — useful for troubleshooting without
       // making the spoken message wordy.
       const debugText = windowInfoDebugText(leafWindowInfo);
       if (debugText) log(debugText);
-      await speakGuarded(`${leafGamesMessage(leafGames, leafReason, settings)} Say ready to continue, or analyze to ask the engine.`);
+      await speakGuarded(`${leafGamesMessage(leafGames, leafReason, settings)} Streak ${streak}. Say ready to continue, or analyze to ask the engine.`);
       await waitForVoiceContinue();
     },
     onReplayStart: async () => {
@@ -1109,8 +1123,9 @@ async function startManualQuiz(quizMode) {
       $('#manual-status').textContent = `Not quite — the move was ${correctSan}. Tap Continue when ready.`;
       await waitForManualContinue();
     },
-    onLineEnd: async ({ missed, leafGames, leafReason, leafWindowInfo }) => {
+    onLineEnd: async ({ missed, leafGames, leafReason, leafWindowInfo, streak }) => {
       hideFetchProgress('manual-fetch-progress');
+      updateStreakDisplay(streak);
       if (missed) return;
       renderManualBoard(manualCurrentFen, null); // the line is done — clear the last-move highlight rather than leaving it up through the whole pause
       const debugText = windowInfoDebugText(leafWindowInfo);
@@ -1195,6 +1210,7 @@ $('#manual-ask-btn').addEventListener('click', () => {
 $('#app-version').textContent = `v${APP_VERSION}`;
 fillSettingsForm();
 renderCacheStatus();
+updateStreakDisplay(loadStreak());
 log(`App ready (v${APP_VERSION}).`);
 
 if ('serviceWorker' in navigator) {

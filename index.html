@@ -139,6 +139,13 @@
   .voice-support-warn{font-size:12px;color:var(--warn);margin-top:6px;}
   .replay-badge{display:inline-block;font-size:11px;font-weight:600;text-transform:none;letter-spacing:normal;
     background:var(--warn);color:#2a1f00;border-radius:999px;padding:3px 10px;margin-left:8px;vertical-align:middle;}
+  /* Consecutive-clean-lines counter (js/storage.js's loadStreak/updateStreak),
+     mirrored into whichever of the three quiz surfaces is on screen at the
+     time -- see app.js's updateStreakDisplay. */
+  .streak-badge{font-size:13px;font-weight:600;color:var(--accent);}
+  #quiz-live .streak-badge{font-size:12px;letter-spacing:1px;text-transform:uppercase;
+    color:#2b2f38;transition:color .4s;}
+  #quiz-live.blackout.peek .streak-badge{color:var(--muted);}
 </style>
 </head>
 <body>
@@ -301,7 +308,10 @@
 
     <section class="view" id="view-quiz">
       <div class="card">
-        <h3>Session</h3>
+        <div class="toggle-row" style="border-bottom:none;padding-bottom:0;">
+          <h3 style="margin:0;">Session</h3>
+          <span class="streak-badge" id="quiz-streak">🔥 0</span>
+        </div>
         <div class="row">
           <label class="chip"><input type="radio" name="quiz-color" value="white" checked> White</label>
           <label class="chip"><input type="radio" name="quiz-color" value="black"> Black</label>
@@ -322,7 +332,8 @@
       </div>
 
       <div class="card" id="manual-quiz-panel" style="display:none;">
-        <h3>Quiz <span id="manual-replay-badge" class="replay-badge" style="display:none;">↻ Replay (memorization)</span></h3>
+        <h3>Quiz <span id="manual-replay-badge" class="replay-badge" style="display:none;">↻ Replay (memorization)</span>
+          <span class="streak-badge" id="manual-streak" style="float:right;">🔥 0</span></h3>
         <div id="manual-board-wrap" style="max-width:320px;margin:0 auto 10px;"></div>
         <div class="hint" id="manual-status">—</div>
         <div class="progress-track" id="manual-fetch-progress-track" style="display:none;"><div class="progress-fill" id="manual-fetch-progress"></div></div>
@@ -377,6 +388,7 @@
 
 <div id="quiz-live">
   <div class="mode-label" id="quiz-mode-label">Quiz</div>
+  <div class="streak-badge" id="quiz-live-streak" style="margin-bottom:10px;">🔥 0</div>
   <div class="caption" id="quiz-caption">Listening…</div>
   <div class="progress-track" id="quiz-fetch-progress-track" style="display:none;"><div class="progress-fill" id="quiz-fetch-progress"></div></div>
   <div class="exit-hint">tap to peek · press stop below to end</div>

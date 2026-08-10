@@ -71,6 +71,22 @@ export function recordLineResult(color, pathId, missed) {
   return s;
 }
 
+// Consecutive-clean-lines streak, across colors and across sessions (a
+// line is "clean" when it's played correctly all the way to a genuine
+// leaf with no missed move -- see quiz.js's runPlaythrough). Persisted
+// like everything else here so quitting the app mid-streak doesn't lose
+// it; a replay (quiz.js's memorization pass after a miss) doesn't call
+// this a second time, only the original fresh attempt does.
+export function loadStreak() {
+  return readJSON('streak', 0);
+}
+
+export function updateStreak(missed) {
+  const streak = missed ? 0 : loadStreak() + 1;
+  writeJSON('streak', streak);
+  return streak;
+}
+
 // Which Lichess-indexed calendar month explorer.js last resolved to, per
 // (ratings, speeds) query signature — persisted (not just kept in memory)
 // so Browse can find previously-cached positions after a fresh page load
