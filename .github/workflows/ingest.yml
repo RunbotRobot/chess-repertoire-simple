@@ -149,7 +149,7 @@ jobs:
                 cd repo
                 git add data/repertoire-white.json data/repertoire-black.json
                 if ! git diff --cached --quiet; then
-                  WHITE_PICK=$(node -e "const d=require('./data/repertoire-white.json');console.log((d.root.myMove?.san||'?')+' '+d.root.total+'g')")
+                  WHITE_PICK=$(node -e "const d=require('./data/repertoire-white.json');const r=d.nodes[d.rootKey];console.log((r.myMove?.san||'?')+' '+r.total+'g')")
                   git commit -q -m "Update repertoire checkpoint data ($(date -u +%Y-%m-%dT%H:%M:%SZ), white picks ${WHITE_PICK})"
                   git pull -q --rebase origin main
                   git push -q origin main
