@@ -18,8 +18,14 @@ name: Ingest Lichess repertoire data
 #      network failure) loses the *entire* run with nothing to show for it;
 #      incremental pushes bound the loss to one chunk's worth, the same
 #      guarantee chunked-ingest.mjs already gives for an ordinary restart.
-# The schedule interval (6h) matches the job cap so runs never overlap in
-# steady state; the concurrency group is a backstop against that anyway.
+# A recoverable node-process failure (the recurring case in practice: a
+# transient network blip mid-download on the ~29GB dump) is retried
+# in-loop within the same job, from the checkpoint it just saved -- see the
+# "Run ingestion" step below. That handles the common case in seconds. The
+# schedule below is just a backstop for the job dying outright (runner
+# failure, OOM, GitHub infra issue) that the in-job retry can't catch --
+# it's hourly rather than matched to the 6h job cap, since the concurrency
+# group already prevents overlap regardless of how often it fires.
 on:
   workflow_dispatch:
     inputs:
@@ -36,7 +42,7 @@ on:
         description: 'Pause feeding early once this many games are unresolved, so production cannot outrun reconciliation without bound'
         default: '50000'
   schedule:
-    - cron: '0 */6 * * *'
+    - cron: '0 * * * *'
 
 permissions:
   contents: write
@@ -170,41 +176,86 @@ jobs:
             )
           }
 
-          timeout 5.5h node repo/pipeline/chunked-ingest.mjs \
-            "$DUMP_URL" \
-            "$GITHUB_WORKSPACE/ckpt" \
-            "$CHUNK_MINUTES" "$MAX_PLIES" "$MIN_GAMES" "$MAX_PENDING_BACKLOG" &
-          INGEST_PID=$!
-
+          # Relaunches chunked-ingest.mjs in a loop, from whatever checkpoint
+          # the previous attempt left behind, instead of letting one
+          # recoverable failure (in practice, almost always a transient
+          # network blip mid-download on the dump) end the whole job and
+          # leave the pipeline idle until the next scheduled tick. DEADLINE
+          # is the same 5.5h budget the old single `timeout 5.5h` call used
+          # -- still well under the 6h job cap -- just now shared across
+          # however many attempts fit inside it rather than spent on one.
+          #
+          # FAST_FAIL_COUNT guards against burning the whole budget on a
+          # crash loop: a real bug (bad args, a code error) fails almost
+          # immediately every time, which looks nothing like "downloaded
+          # most of a 29GB file, then the connection dropped" -- so five
+          # attempts in a row each lasting under 30s is treated as a real
+          # failure worth surfacing, not noise worth swallowing.
+          DEADLINE=$(( $(date +%s) + 5*3600 + 30*60 ))
           LAST=""
-          while kill -0 "$INGEST_PID" 2>/dev/null; do
-            sleep 300
-            push_progress_log
-            if [ -f ckpt/nodes.json ]; then
-              CUR=$(stat -c %Y ckpt/nodes.json 2>/dev/null || echo "")
-              if [ -n "$CUR" ] && [ "$CUR" != "$LAST" ]; then
-                echo "--- New checkpoint detected at $(date -u +%Y-%m-%dT%H:%M:%SZ), pushing ---"
-                du -sh ckpt/*.json 2>/dev/null
-                df -h /
-                push_checkpoint
-                LAST="$CUR"
-              fi
-            fi
-          done
+          ATTEMPT=0
+          FAST_FAIL_COUNT=0
 
-          set +e
-          wait "$INGEST_PID"
-          code=$?
-          set -e
-          echo "chunked-ingest.mjs exited with code $code"
-          push_checkpoint # final push, covers whatever landed since the last poll
-          # 124 = timeout hit the 5.5h bound, which is expected and fine;
-          # anything else nonzero is a real failure worth surfacing (after
-          # the push above already ran, so we don't lose progress reporting it).
-          if [ "$code" -ne 0 ] && [ "$code" -ne 124 ]; then
-            echo "chunked-ingest.mjs exited with unexpected code $code"
-            exit "$code"
-          fi
+          while true; do
+            ATTEMPT=$((ATTEMPT + 1))
+            NOW=$(date +%s)
+            REMAINING=$((DEADLINE - NOW))
+            if [ "$REMAINING" -le 60 ]; then
+              echo "=== Less than a minute left in this job's budget -- stopping the retry loop ==="
+              break
+            fi
+            echo "=== Ingestion attempt $ATTEMPT, ${REMAINING}s remaining in this job's budget ==="
+            ATTEMPT_START=$(date +%s)
+
+            timeout "${REMAINING}s" node repo/pipeline/chunked-ingest.mjs \
+              "$DUMP_URL" \
+              "$GITHUB_WORKSPACE/ckpt" \
+              "$CHUNK_MINUTES" "$MAX_PLIES" "$MIN_GAMES" "$MAX_PENDING_BACKLOG" &
+            INGEST_PID=$!
+
+            while kill -0 "$INGEST_PID" 2>/dev/null; do
+              sleep 300
+              push_progress_log
+              if [ -f ckpt/nodes.json ]; then
+                CUR=$(stat -c %Y ckpt/nodes.json 2>/dev/null || echo "")
+                if [ -n "$CUR" ] && [ "$CUR" != "$LAST" ]; then
+                  echo "--- New checkpoint detected at $(date -u +%Y-%m-%dT%H:%M:%SZ), pushing ---"
+                  du -sh ckpt/*.json 2>/dev/null
+                  df -h /
+                  push_checkpoint
+                  LAST="$CUR"
+                fi
+              fi
+            done
+
+            set +e
+            wait "$INGEST_PID"
+            code=$?
+            set -e
+            ATTEMPT_DURATION=$(( $(date +%s) - ATTEMPT_START ))
+            echo "chunked-ingest.mjs (attempt $ATTEMPT) exited with code $code after ${ATTEMPT_DURATION}s"
+            push_checkpoint # covers whatever landed since the last poll, win or lose
+
+            if [ "$code" -eq 124 ]; then
+              echo "=== Hit this job's time budget -- stopping cleanly, a future run will continue from here ==="
+              break
+            elif [ "$code" -eq 0 ]; then
+              echo "=== Stream exhausted -- the full month is fully processed, nothing left to do ==="
+              break
+            fi
+
+            if [ "$ATTEMPT_DURATION" -lt 30 ]; then
+              FAST_FAIL_COUNT=$((FAST_FAIL_COUNT + 1))
+            else
+              FAST_FAIL_COUNT=0
+            fi
+            if [ "$FAST_FAIL_COUNT" -ge 5 ]; then
+              echo "=== $FAST_FAIL_COUNT fast failures in a row -- this doesn't look like a transient network blip, stopping to avoid burning the whole job budget on a crash loop ==="
+              exit "$code"
+            fi
+            echo "Non-zero exit ($code), consistent with a recoverable network hiccup -- retrying from checkpoint in 5s."
+            sleep 5
+          done
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
