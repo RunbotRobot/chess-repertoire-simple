@@ -158,21 +158,40 @@ jobs:
             fi
           }
 
-          # Pushes just progress.log, on its own, every poll -- separate from
-          # push_checkpoint's full bundle (which only fires when a whole
-          # checkpoint actually lands). chunked-ingest.mjs's log() appends
-          # to this file synchronously throughout the run, including now
-          # from inside a long-running finish() call (see streaming-engine.
-          # mjs's onRound/onFetch hooks) -- pushing it eagerly is the only
-          # way to see live signs of life during a long reconciliation,
-          # rather than only finding out what happened after the fact.
+          # Pushes progress.log eagerly, every poll where it grew -- separate
+          # from push_checkpoint's fuller bundle (which only fires when a
+          # whole NEW checkpoint actually lands, i.e. only once per
+          # chunkMinutes or so). chunked-ingest.mjs's log() appends to this
+          # file synchronously throughout the run, including now from inside
+          # a long-running finish() call (see streaming-engine.mjs's
+          # onRound/onFetch hooks) -- pushing it eagerly is the only way to
+          # see live signs of life during a long reconciliation, rather than
+          # only finding out what happened after the fact.
+          #
+          # Also carries along whatever nodes.json/pending.json/meta.json
+          # currently exist in ckpt/ (the last real checkpoint's files,
+          # still sitting on disk between checkpoints -- chunked-ingest.mjs
+          # only overwrites them when it saves a new one) even though this
+          # isn't a new checkpoint. This used to push progress.log ALONE via
+          # a fresh `git init` each time, which force-pushes an orphan
+          # commit containing ONLY that file -- silently wiping nodes.json/
+          # pending.json/meta.json off the branch until the next real
+          # checkpoint happened to land. In production this left the branch
+          # with no restorable checkpoint at all for most of every cycle: if
+          # the job died in that window (the exact kind of crash this whole
+          # workflow exists to recover from), the next run would restart
+          # from zero, discarding everything ingested so far instead of
+          # resuming. The branch must always hold either nothing (first
+          # run) or a complete, consistent snapshot -- never a partial one.
           LAST_LOG_SIZE=""
           push_progress_log() {
             [ -f ckpt/progress.log ] || return 0
             CUR_SIZE=$(stat -c %s ckpt/progress.log 2>/dev/null || echo "")
             [ "$CUR_SIZE" = "$LAST_LOG_SIZE" ] && return 0
             LAST_LOG_SIZE="$CUR_SIZE"
-            rm -rf log_push && mkdir log_push && cp ckpt/progress.log log_push/
+            rm -rf log_push && mkdir log_push
+            cp ckpt/progress.log log_push/
+            [ -f ckpt/nodes.json ] && cp ckpt/nodes.json ckpt/pending.json ckpt/meta.json log_push/
             (
               cd log_push
               git init -q
@@ -180,6 +199,7 @@ jobs:
               git config user.name "github-actions[bot]"
               git config user.email "github-actions[bot]@users.noreply.github.com"
               git add progress.log
+              [ -f nodes.json ] && git add nodes.json pending.json meta.json
               git commit -q -m "Progress log $(date -u +%Y-%m-%dT%H:%M:%SZ)"
               git remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
               # Only the log, not the full checkpoint state -- if a real

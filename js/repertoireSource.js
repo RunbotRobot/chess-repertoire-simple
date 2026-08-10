@@ -1,12 +1,16 @@
 // Data source backed by a precomputed repertoire file (pipeline/algorithm.js's
-// selectRepertoire, as written out periodically by pipeline/chunked-ingest.mjs)
-// instead of live per-position Lichess Explorer lookups -- see explorer.js's
-// header comment for that live path. The whole tree for a color is fetched
-// once and held in memory; every position lookup after that is a pure,
-// synchronous walk down myMove.child / replies[].child links, so there's no
-// per-position network cost and no cache-freshness/history-window concept
-// the way explorer.js has (a fresh checkpoint is a whole new file, not
-// something to escalate into piecemeal).
+// selectRepertoireGraph, as written out periodically by pipeline/chunked-
+// ingest.mjs) instead of live per-position Lichess Explorer lookups -- see
+// explorer.js's header comment for that live path. The whole graph for a
+// color is fetched once and held in memory as a flat, position-keyed map
+// (not a nested tree -- see selectRepertoireGraph's own doc comment for
+// why: a nested tree that also fully recurses every non-chosen alternate
+// duplicates any position reachable via more than one path, which blew
+// real output past GitHub's 100MB file limit); every position lookup after
+// that is a pure, synchronous walk that resolves each step's childKey
+// against that map, so there's no per-position network cost and no
+// cache-freshness/history-window concept the way explorer.js has (a fresh
+// checkpoint is a whole new file, not something to escalate into piecemeal).
 //
 // Exposes getLocalPosition/peekLocalPosition with the same {node, ...}
 // return contract as explorer.js's getPosition/peekPosition, and the same
@@ -15,7 +19,7 @@
 // consume -- so app.js can pick between the two sources with a single
 // settings check, without quiz.js or Browse needing to know which is live.
 
-const state = new Map(); // color -> { url, root, minGames, generatedAt }
+const state = new Map(); // color -> { url, nodesByKey, rootKey, minGames, generatedAt }
 
 function localRepertoireUrl(settings, color) {
   const base = (settings.localDataUrl || './data').replace(/\/+$/, '');
@@ -35,32 +39,31 @@ async function ensureLoaded(color, settings, opts = {}) {
   const res = await fetch(url, { cache: 'no-store' });
   if (!res.ok) throw new Error(`Failed to load local repertoire data from ${url}: HTTP ${res.status}`);
   const data = await res.json();
-  if (!data || typeof data.minGames !== 'number' || !data.root) {
-    throw new Error(`${url} doesn't look like a repertoire checkpoint file (expected {minGames, generatedAt, root})`);
+  if (!data || typeof data.minGames !== 'number' || !data.rootKey || !data.nodes) {
+    throw new Error(`${url} doesn't look like a repertoire checkpoint file (expected {minGames, generatedAt, rootKey, nodes})`);
   }
   opts.onFetchProgress?.({ completed: 1, total: 1 });
 
-  const entry = { url, root: data.root, minGames: data.minGames, generatedAt: data.generatedAt || null };
+  const entry = { url, nodesByKey: data.nodes, rootKey: data.rootKey, minGames: data.minGames, generatedAt: data.generatedAt || null };
   state.set(color, entry);
   return entry;
 }
 
-// Walks uciPath from the tree's root, following whichever of
-// myMove/replies matches each step -- both are populated exclusively by
-// selectRepertoire, so any path this module itself ever hands back out
-// (via translateNode's myMove.uci / opponentMoves[].uci) is guaranteed to
-// match one of these branches; returns null only for a path this source
-// never offered in the first place. Note alternates never match here --
-// selectRepertoire deliberately keeps them as a score/games reference only
-// (see its own doc comment for why: a full recursive child per alternate
-// blew real output past GitHub's 100MB file limit), so Browse currently
-// can't walk into a non-chosen move.
-function findNode(root, uciPath) {
-  let node = root;
+// Walks uciPath from the root, resolving each step's childKey against
+// nodesByKey -- myMove, replies, and alternates all carry a childKey (see
+// selectRepertoireGraph in algorithm.js), so unlike the old nested-tree
+// shape, ANY qualifying move at ANY decision point is reachable this way,
+// not just the repertoire's own chosen line and the opponent's replies.
+// Returns null only for a path this source never offered in the first
+// place (e.g. a move that never qualified at minGames).
+function findNode(nodesByKey, rootKey, uciPath) {
+  let node = nodesByKey[rootKey];
   for (const uci of uciPath) {
-    if (node.myMove && node.myMove.uci === uci) { node = node.myMove.child; continue; }
+    if (node.myMove && node.myMove.uci === uci) { node = nodesByKey[node.myMove.childKey]; continue; }
     const reply = node.replies?.find((r) => r.uci === uci);
-    if (reply) { node = reply.child; continue; }
+    if (reply) { node = nodesByKey[reply.childKey]; continue; }
+    const alt = node.alternates?.find((a) => a.uci === uci);
+    if (alt) { node = nodesByKey[alt.childKey]; continue; }
     return null;
   }
   return node;
@@ -71,8 +74,8 @@ function findNode(root, uciPath) {
 // changes: 'insufficient-total' when this exact position never cleared the
 // pipeline's own minGames threshold in the first place, 'no-qualifying-move'
 // / 'no-qualifying-reply' when it did but nothing below it did (mirrors
-// scorePass/selectRepertoire's isLeaf-despite-qualifying-total case).
-function translateNode(repNode, minGames, color) {
+// scorePass/selectRepertoireGraph's isLeaf-despite-qualifying-total case).
+function translateNode(repNode, nodesByKey, minGames, color) {
   const games = repNode.total;
   if (repNode.myMove) {
     return {
@@ -81,7 +84,7 @@ function translateNode(repNode, minGames, color) {
         san: repNode.myMove.san,
         uci: repNode.myMove.uci,
         score: repNode.myMove.score,
-        games: repNode.myMove.child.total,
+        games: nodesByKey[repNode.myMove.childKey]?.total ?? 0,
       },
       alternates: (repNode.alternates || []).map((a) => ({ san: a.san, uci: a.uci, score: a.score, games: a.games })),
       opponentMoves: null,
@@ -102,7 +105,7 @@ function translateNode(repNode, minGames, color) {
 
 /**
  * Local-data counterpart to explorer.js's getPosition(): loads (or reuses
- * the in-memory) whole-tree checkpoint for `color`, then walks straight to
+ * the in-memory) whole-graph checkpoint for `color`, then walks straight to
  * uciPath -- no network cost beyond the one whole-file fetch, which only
  * happens once per color per (session, localDataUrl) until
  * refreshLocalRepertoire() is called.
@@ -120,10 +123,10 @@ export async function getLocalPosition(uciPath, color, settings, opts = {}) {
   }
 
   const wasLoaded = state.has(color);
-  const { root, minGames, generatedAt } = await ensureLoaded(color, settings, opts);
-  const found = findNode(root, uciPath);
+  const { nodesByKey, rootKey, minGames, generatedAt } = await ensureLoaded(color, settings, opts);
+  const found = findNode(nodesByKey, rootKey, uciPath);
   const node = found
-    ? translateNode(found, minGames, color)
+    ? translateNode(found, nodesByKey, minGames, color)
     : { games: 0, myMove: null, opponentMoves: null, leafReason: 'insufficient-total' };
   node.windowInfo = null; // no history-window concept for a precomputed snapshot
   return { node, cacheHit: wasLoaded, fetchedAt: generatedAt };
@@ -132,7 +135,7 @@ export async function getLocalPosition(uciPath, color, settings, opts = {}) {
 /**
  * Browse's read-only counterpart, matching peekPosition's signature. Unlike
  * the live source, "peek" and "get" cost the same here (both are a
- * synchronous tree walk once the file's loaded) -- so this loads on demand
+ * synchronous lookup once the file's loaded) -- so this loads on demand
  * too, rather than only reading whatever's already resident, since there's
  * no live-network-cost reason to hold Browse back the way peekPosition does.
  *

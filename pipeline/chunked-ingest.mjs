@@ -57,7 +57,7 @@ import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, appendFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parsePgnGamesStream } from './ingest.js';
-import { scorePass, selectRepertoire, positionKey } from './algorithm.js';
+import { scorePass, selectRepertoireGraph, positionKey } from './algorithm.js';
 import { createStreamingGraphBuilder } from './streaming-engine.mjs';
 import { fetchGamesBatch, getRateLimitStats } from './lichess-fetch.mjs';
 import { Chess } from '../js/vendor/chess.esm.js';
@@ -276,22 +276,32 @@ async function checkpointAndScore(deadlineMs) {
   const generatedAt = new Date().toISOString();
   const whiteScores = scorePass(nodes, 'white', minGames);
   const blackScores = scorePass(nodes, 'black', minGames);
-  const whiteRepertoire = selectRepertoire(nodes, whiteScores, 'white', minGames);
-  const blackRepertoire = selectRepertoire(nodes, blackScores, 'black', minGames);
+  const whiteGraph = selectRepertoireGraph(nodes, whiteScores, 'white', minGames);
+  const blackGraph = selectRepertoireGraph(nodes, blackScores, 'black', minGames);
   // Wrapped with minGames/generatedAt (rather than writing the bare
-  // RepertoireNode tree) so a consumer -- the app's repertoireSource.js --
-  // can tell a genuine data-scarcity leaf (total < minGames) apart from a
-  // "plenty of games, just none individually qualifying" leaf without
-  // hardcoding the threshold this run happened to use, and can show how
-  // fresh the data is, since this file gets overwritten repeatedly during a
-  // long-running ingestion.
-  writeAtomic(whiteOutPath, JSON.stringify({ minGames, generatedAt, root: whiteRepertoire }));
-  writeAtomic(blackOutPath, JSON.stringify({ minGames, generatedAt, root: blackRepertoire }));
+  // graph) so a consumer -- the app's repertoireSource.js -- can tell a
+  // genuine data-scarcity leaf (total < minGames) apart from a "plenty of
+  // games, just none individually qualifying" leaf without hardcoding the
+  // threshold this run happened to use, and can show how fresh the data
+  // is, since this file gets overwritten repeatedly during a long-running
+  // ingestion. Flat (rootKey + nodes-by-key), not a nested tree: a nested
+  // tree that also fully recurses every non-chosen alternate (needed so
+  // Browse can follow one to its real leaf, not just its top-level score)
+  // duplicates any position reachable via more than one path -- real
+  // production data hit ~105MB per color that way, over GitHub's 100MB
+  // file limit. Keying by position instead caps output at the number of
+  // unique qualifying positions, the same order of magnitude as the graph
+  // itself, regardless of how many paths (transpositions, or now also
+  // alternates) reach any of them. See selectRepertoireGraph's own doc
+  // comment in algorithm.js.
+  writeAtomic(whiteOutPath, JSON.stringify({ minGames, generatedAt, rootKey: whiteGraph.rootKey, nodes: whiteGraph.nodes }));
+  writeAtomic(blackOutPath, JSON.stringify({ minGames, generatedAt, rootKey: blackGraph.rootKey, nodes: blackGraph.nodes }));
 
   const rootKey = positionKey(new Chess().fen());
   const rootNode = nodes.get(rootKey);
   const qualifying = [...nodes.values()].filter((n) => n.total >= minGames).length;
-  log(`Checkpoint: ${nodes.size} nodes (${qualifying} qualifying), ${pendingSnapshot.records.length} games still in flight, white picks ${whiteRepertoire.myMove?.san ?? 'nothing yet'} (${((whiteRepertoire.myMove?.score ?? 0) * 100).toFixed(1)}%), root total ${rootNode?.total ?? 0} games -- saved in ${Date.now() - t}ms`);
+  const whiteRoot = whiteGraph.nodes[whiteGraph.rootKey];
+  log(`Checkpoint: ${nodes.size} nodes (${qualifying} qualifying), ${pendingSnapshot.records.length} games still in flight, white picks ${whiteRoot.myMove?.san ?? 'nothing yet'} (${((whiteRoot.myMove?.score ?? 0) * 100).toFixed(1)}%), root total ${rootNode?.total ?? 0} games -- saved in ${Date.now() - t}ms`);
 }
 
 log(`Starting: chunkMinutes=${chunkMinutes} maxPlies=${maxPlies} minGames=${minGames} maxPendingBacklog=${maxPendingBacklog}`);

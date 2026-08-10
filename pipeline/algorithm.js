@@ -748,6 +748,114 @@ export function selectRepertoire(graph, scores, color, minGames, rootFen) {
   return build(rootKey);
 }
 
+/**
+ * Same forward selection as selectRepertoire (spec step 8: one followed
+ * move at the builder's own decision points, every qualifying reply at the
+ * opponent's), but returns a FLAT, deduplicated graph instead of a nested
+ * tree — every qualifying position reachable from root gets exactly one
+ * entry, referenced by key from wherever it's reachable, rather than a
+ * fresh embedded copy per path that reaches it.
+ *
+ * This is what makes it safe to also include a full subtree for every
+ * qualifying alternate at the builder's own decision points (not just the
+ * followed best move) — selectRepertoire tried that once as a nested tree
+ * and it blew real output past GitHub's 100MB file limit, because a
+ * popular, deep-branching alternate's descendants get duplicated once per
+ * distinct path that reaches them (compounding badly once every own-move
+ * alternate ALSO recurses, not just the single followed line). Keying by
+ * position and visiting each key at most once caps total output size at
+ * the number of unique qualifying positions reachable from root — the
+ * same order of magnitude as the graph itself — regardless of branching
+ * or transpositions, while still letting Browse follow ANY qualifying
+ * move, not just the repertoire's own pick, all the way to a real leaf.
+ *
+ * @param {Map<string, PositionNode>} graph
+ * @param {Map<string, {score:number, isLeaf:boolean}>} scores from scorePass(graph, color, minGames)
+ * @param {'white'|'black'} color
+ * @param {number} minGames must match what scorePass was called with
+ * @param {string} [rootFen] defaults to the standard start position
+ * @returns {{rootKey: string, nodes: Object<string, FlatRepertoireNode>}} see shape below
+ */
+export function selectRepertoireGraph(graph, scores, color, minGames, rootFen) {
+  const startFen = rootFen || new Chess().fen();
+  const rootKey = positionKey(startFen);
+  const nodes = {};
+  // Breadth-first over KEYS, not paths -- `queued` guards both the initial
+  // enqueue and re-enqueue, so a position reachable via many transposing
+  // move orders (only more likely now that own alternates branch too) is
+  // still visited, and its qualifying children discovered, exactly once.
+  const queue = [rootKey];
+  let queueHead = 0;
+  const queued = new Set([rootKey]);
+
+  while (queueHead < queue.length) {
+    const key = queue[queueHead++];
+    const node = graph.get(key);
+    const scored = scores.get(key);
+    const mover = sideToMove(node.fen);
+    const flat = {
+      fen: node.fen,
+      sideToMove: mover,
+      total: node.total,
+      whiteWins: node.whiteWins,
+      draws: node.draws,
+      blackWins: node.blackWins,
+      score: scored ? scored.score : leafScore(node, color),
+      myMove: null,
+      alternates: null,
+      replies: null,
+    };
+    nodes[key] = flat;
+    if (!scored || scored.isLeaf) continue; // nothing below the threshold to select into
+
+    const qualifying = [...node.children.values()]
+      .map((edge) => ({ edge, child: graph.get(edge.key) }))
+      .filter(({ child }) => child && child.total >= minGames);
+
+    if (mover === color) {
+      let best = null;
+      const scoredCands = qualifying.map(({ edge, child }) => ({ edge, child, s: scores.get(child.key)?.score ?? leafScore(child, color) }));
+      for (const c of scoredCands) {
+        if (best === null || c.s > best.s) best = c;
+      }
+      if (best) {
+        flat.myMove = { san: best.edge.san, uci: best.edge.uci, score: best.s, childKey: best.edge.key };
+        flat.alternates = scoredCands
+          .filter((c) => c !== best)
+          .map((c) => ({ san: c.edge.san, uci: c.edge.uci, score: c.s, games: c.child.total, childKey: c.edge.key }))
+          .sort((a, b) => b.score - a.score);
+        for (const c of scoredCands) {
+          if (!queued.has(c.edge.key)) { queued.add(c.edge.key); queue.push(c.edge.key); }
+        }
+      }
+    } else {
+      flat.replies = qualifying
+        .map(({ edge, child }) => ({ san: edge.san, uci: edge.uci, games: child.total, share: child.total / node.total, childKey: edge.key }))
+        .sort((a, b) => b.games - a.games);
+      for (const { edge } of qualifying) {
+        if (!queued.has(edge.key)) { queued.add(edge.key); queue.push(edge.key); }
+      }
+    }
+  }
+
+  return { rootKey, nodes };
+}
+
+/*
+FlatRepertoireNode shape (returned by selectRepertoireGraph, as each value
+in .nodes):
+  {
+    fen, sideToMove, total, whiteWins, draws, blackWins, score,
+    myMove: { san, uci, score, childKey } | null,   // set only at the builder's own decision points that had a qualifying move; childKey indexes .nodes
+    alternates: [{ san, uci, score, games, childKey }] | null,   // EVERY other qualifying candidate at that same decision point (not just a reference -- childKey indexes .nodes, so Browse can follow any of them); set only alongside myMove, sorted by score desc
+    replies: [{ san, uci, games, share, childKey }] | null,  // set only at the opponent's decision points, sorted by games desc
+  }
+Exactly one of myMove/replies is non-null at any node with a qualifying
+child; both are null at a leaf. Unlike RepertoireNode below, this is
+addressed by key, not nested -- look up nodes[key] rather than following
+an embedded object.
+*/
+
 /*
 RepertoireNode shape (returned by selectRepertoire, and recursively as
 every .child):
