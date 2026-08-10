@@ -67,7 +67,7 @@
 // month at a time.
 import { getCached, putCached } from './positionCache.js';
 import { loadResolvedMonth, saveResolvedMonth } from './storage.js';
-import { normalizeLichessUci } from './chessUtil.js';
+import { normalizeLichessUci, wilsonLowerBound } from './chessUtil.js';
 
 const EXPLORER_URL = 'https://explorer.lichess.org/lichess';
 
@@ -206,6 +206,36 @@ async function fetchExplorerRaw(url, { signal, token } = {}) {
   }
 }
 
+// Every move (mine or the opponent's) gets the SAME stat shape, so Browse
+// can render one table with one column set regardless of whose decision
+// point it's looking at: score is the Wilson lower bound (see
+// wilsonLowerBound's own doc comment) of MY win rate from the resulting
+// position — the same statistically-adjusted quantity the local pipeline
+// scores with (pipeline/algorithm.js's leafScore), so live and local
+// Browse show consistent, comparably-adjusted numbers, not raw rates on
+// one side and adjusted ones on the other. winRate/drawRate/lossRate are
+// the raw (unadjusted) breakdown of what actually happened after this
+// move, from my perspective (a black loss counts toward lossRate exactly
+// like a white win does when color is 'black'). share is how often this
+// move is actually played at this position, out of every game that
+// reached it — for a my-move candidate that's "how well-tested is this
+// line", for an opponent reply it's "how likely am I to actually face
+// this."
+function moveStats(m, color, totalGames) {
+  const white = m.white || 0, draws = m.draws || 0, black = m.black || 0;
+  const n = white + draws + black;
+  const wins = color === 'white' ? white : black;
+  const losses = color === 'white' ? black : white;
+  return {
+    uci: normalizeLichessUci(m.uci), san: m.san, games: n,
+    score: wilsonLowerBound(wins, n),
+    winRate: n > 0 ? wins / n : 0,
+    drawRate: n > 0 ? draws / n : 0,
+    lossRate: n > 0 ? losses / n : 0,
+    share: totalGames > 0 ? n / totalGames : 0,
+  };
+}
+
 // Pure function: turns one raw Lichess response into a repertoire node,
 // given the color/ply context and current scoring settings. No I/O, so it's
 // cheap to recompute on every read — meaning changing minSampleSize etc. in
@@ -225,18 +255,20 @@ function computeNodeFromRaw(data, color, ply, settings) {
   const isMyMove = (ply % 2 === 0) === (color === 'white');
 
   if (isMyMove) {
-    // Score every candidate by MY win rate from this position, draws = loss.
-    // Ties go to the move with more games (more real-world testing of that
-    // line); if it's still tied after that, pick uniformly at random among
-    // the tied candidates (reservoir sampling — each survives with
-    // probability 1/(number of ties seen so far), which works out uniform
-    // without needing to collect the whole tied group first).
+    // Score every candidate by its Wilson-adjusted win rate (moveStats
+    // above) rather than the raw rate — the fix for the exact anomaly
+    // pipeline/algorithm.js documents (a 50-game 60%-win move outranking a
+    // 72,488-game 50%-win move on raw rate alone). Ties go to the move
+    // with more games (more real-world testing of that line); if it's
+    // still tied after that, pick uniformly at random among the tied
+    // candidates (reservoir sampling — each survives with probability
+    // 1/(number of ties seen so far), which works out uniform without
+    // needing to collect the whole tied group first).
     const candidates = [];
     for (const m of moves) {
       const n = (m.white || 0) + (m.draws || 0) + (m.black || 0);
       if (n < settings.minSampleSize) continue;
-      const wins = color === 'white' ? (m.white || 0) : (m.black || 0);
-      candidates.push({ uci: normalizeLichessUci(m.uci), san: m.san, games: n, score: wins / n });
+      candidates.push(moveStats(m, color, totalGames));
     }
     candidates.sort((a, b) => b.score - a.score || b.games - a.games);
 
@@ -268,9 +300,8 @@ function computeNodeFromRaw(data, color, ply, settings) {
 
   // Keep every reply that's genuinely common; I need to be ready for it.
   const kept = moves
-    .map((m) => ({ uci: normalizeLichessUci(m.uci), san: m.san, games: (m.white || 0) + (m.draws || 0) + (m.black || 0) }))
+    .map((m) => moveStats(m, color, totalGames))
     .filter((m) => m.games > 0)
-    .map((m) => ({ ...m, share: m.games / totalGames }))
     .filter((m) => m.share >= settings.opponentBranchMinShare || m.games >= settings.opponentBranchMinGames)
     .sort((a, b) => b.games - a.games);
   if (kept.length === 0) {

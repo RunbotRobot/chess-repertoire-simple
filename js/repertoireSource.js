@@ -75,18 +75,45 @@ function findNode(nodesByKey, rootKey, uciPath) {
 // pipeline's own minGames threshold in the first place, 'no-qualifying-move'
 // / 'no-qualifying-reply' when it did but nothing below it did (mirrors
 // scorePass/selectRepertoireGraph's isLeaf-despite-qualifying-total case).
+//
+// Every move entry (myMove, each alternate, each opponent reply) carries
+// the SAME stat shape as explorer.js's live-mode moveStats(), so Browse's
+// move table has one column set regardless of data source or whose
+// decision point it's looking at: score is the resolved child position's
+// own already-computed score (a leaf's Wilson lower bound, or a minimax-
+// propagated score for a non-leaf — see algorithm.js's scorePass), read
+// from the child node itself rather than the edge (a reply edge never
+// carried its own .score — only myMove/alternates edges did — but the
+// CHILD node always has one, since scorePass scores every qualifying
+// position regardless of whose move reached it). winRate/drawRate/lossRate
+// are the raw (unadjusted) breakdown of the child position's own tally,
+// from `color`'s perspective; share is how much of the parent position's
+// total games actually went through this move.
+function moveEntry(edge, parentTotal, color, nodesByKey) {
+  const child = nodesByKey[edge.childKey];
+  const total = child?.total ?? 0;
+  const whiteWins = child?.whiteWins ?? 0;
+  const draws = child?.draws ?? 0;
+  const blackWins = child?.blackWins ?? 0;
+  const wins = color === 'white' ? whiteWins : blackWins;
+  const losses = color === 'white' ? blackWins : whiteWins;
+  return {
+    san: edge.san, uci: edge.uci, games: total,
+    score: child?.score ?? 0,
+    winRate: total > 0 ? wins / total : 0,
+    drawRate: total > 0 ? draws / total : 0,
+    lossRate: total > 0 ? losses / total : 0,
+    share: parentTotal > 0 ? total / parentTotal : 0,
+  };
+}
+
 function translateNode(repNode, nodesByKey, minGames, color) {
   const games = repNode.total;
   if (repNode.myMove) {
     return {
       games,
-      myMove: {
-        san: repNode.myMove.san,
-        uci: repNode.myMove.uci,
-        score: repNode.myMove.score,
-        games: nodesByKey[repNode.myMove.childKey]?.total ?? 0,
-      },
-      alternates: (repNode.alternates || []).map((a) => ({ san: a.san, uci: a.uci, score: a.score, games: a.games })),
+      myMove: moveEntry(repNode.myMove, games, color, nodesByKey),
+      alternates: (repNode.alternates || []).map((a) => moveEntry(a, games, color, nodesByKey)),
       opponentMoves: null,
       leafReason: null,
     };
@@ -95,7 +122,7 @@ function translateNode(repNode, nodesByKey, minGames, color) {
     return {
       games,
       myMove: null,
-      opponentMoves: repNode.replies.map((r) => ({ san: r.san, uci: r.uci, games: r.games, share: r.share })),
+      opponentMoves: repNode.replies.map((r) => moveEntry(r, games, color, nodesByKey)),
       leafReason: null,
     };
   }

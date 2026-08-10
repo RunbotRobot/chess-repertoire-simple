@@ -15,7 +15,7 @@ import { Chess } from './vendor/chess.esm.js';
 // devtools is actually running the latest code, and it also drives the
 // service worker's cache name (see sw.js) so updates actually take effect
 // instead of being served stale from the offline cache.
-export const APP_VERSION = 43;
+export const APP_VERSION = 44;
 
 const COLOR_OPTIONS = ['white', 'black'];
 const RATING_OPTIONS = ['1000', '1200', '1400', '1600', '1800', '2000', '2200', '2500'];
@@ -372,6 +372,55 @@ async function attemptBrowseMove(move) {
   $('#browse-feedback').textContent = `${numberPrefix} ${move.san} not in cache.`;
 }
 
+function gamesTotalHint(games) {
+  const div = document.createElement('div');
+  div.className = 'hint';
+  div.style.marginBottom = '6px';
+  div.textContent = `${games} games at this position`;
+  return div;
+}
+
+function fmtPct(x) { return `${Math.round((x || 0) * 100)}%`; }
+
+// One table for either side of a decision point (my move + alternates, or
+// the opponent's replies) — same column set either way (score, the raw
+// win/draw/loss breakdown, and how often the move is actually played),
+// backed by explorer.js's/repertoireSource.js's shared moveStats/moveEntry
+// shape. A sticky header (see index.html's .movetable CSS) means the
+// column labels don't need repeating inline on every row — the per-row
+// game count is deliberately omitted too (share/score already convey what
+// matters; the total game count for the whole position is shown once,
+// above the table, via gamesTotalHint) — both to keep rows compact on a
+// narrow phone screen. chosenUci marks the repertoire's actual pick (my
+// decision points only — the opponent has no "chosen" move, every kept
+// reply is equally real).
+function buildMoveTable(entries, { chosenUci } = {}) {
+  const wrap = document.createElement('div');
+  wrap.className = 'movetable-wrap';
+  const table = document.createElement('table');
+  table.className = 'movetable';
+  table.innerHTML = `
+    <colgroup>
+      <col class="col-move"><col class="col-stat"><col class="col-stat">
+      <col class="col-stat"><col class="col-stat"><col class="col-stat">
+    </colgroup>
+    <thead><tr>
+      <th>Move</th><th>Score</th><th>Win</th><th>Draw</th><th>Loss</th><th>Freq</th>
+    </tr></thead>`;
+  const tbody = document.createElement('tbody');
+  for (const m of entries) {
+    const tr = document.createElement('tr');
+    if (chosenUci) tr.className = m.uci === chosenUci ? 'chosen' : 'alt';
+    tr.innerHTML = `<td>${m.san}</td><td>${fmtPct(m.score)}</td><td>${fmtPct(m.winRate)}</td>` +
+      `<td>${fmtPct(m.drawRate)}</td><td>${fmtPct(m.lossRate)}</td><td>${fmtPct(m.share)}</td>`;
+    tr.addEventListener('click', () => { browsePath = [...browsePath, m]; browseSelectedSquare = null; renderBrowse(); });
+    tbody.appendChild(tr);
+  }
+  table.appendChild(tbody);
+  wrap.appendChild(table);
+  return wrap;
+}
+
 async function renderBrowse() {
   const boardWrap = $('#board-wrap');
   const breadcrumb = $('#browse-breadcrumb');
@@ -430,35 +479,15 @@ async function renderBrowse() {
   }
 
   if (node.myMove) {
-    const btn = document.createElement('button');
-    btn.className = 'movebtn mine';
-    btn.innerHTML = `<span>My move: ${node.myMove.san}</span><span class="pct">${node.myMove.games} games, ${(node.myMove.score * 100).toFixed(0)}% score</span>`;
-    btn.addEventListener('click', () => { browsePath = [...browsePath, node.myMove]; browseSelectedSquare = null; renderBrowse(); });
-    movelist.appendChild(btn);
-
-    if (node.alternates && node.alternates.length > 0) {
-      const label = document.createElement('div');
-      label.className = 'hint';
-      label.style.marginTop = '8px';
-      label.textContent = 'Other candidates (not the repertoire pick, shown for reference):';
-      movelist.appendChild(label);
-      for (const alt of node.alternates) {
-        const altBtn = document.createElement('button');
-        altBtn.className = 'movebtn alt';
-        altBtn.innerHTML = `<span>${alt.san}</span><span class="pct">${alt.games} games, ${(alt.score * 100).toFixed(0)}% score</span>`;
-        altBtn.addEventListener('click', () => { browsePath = [...browsePath, alt]; browseSelectedSquare = null; renderBrowse(); });
-        movelist.appendChild(altBtn);
-      }
-    }
+    movelist.appendChild(gamesTotalHint(node.games));
+    movelist.appendChild(buildMoveTable([node.myMove, ...(node.alternates || [])], { chosenUci: node.myMove.uci }));
   } else if (node.opponentMoves) {
-    for (const m of node.opponentMoves) {
-      const btn = document.createElement('button');
-      btn.className = 'movebtn';
-      btn.innerHTML = `<span>${m.san}</span><span class="pct">${(m.share * 100).toFixed(0)}% · ${m.games} games</span>`;
-      btn.addEventListener('click', () => { browsePath = [...browsePath, m]; browseSelectedSquare = null; renderBrowse(); });
-      movelist.appendChild(btn);
+    if (node.opponentMoves.length === 0) {
+      movelist.insertAdjacentHTML('beforeend', `<div class="hint">End of prepared theory for this line.</div>`);
+    } else {
+      movelist.appendChild(gamesTotalHint(node.games));
+      movelist.appendChild(buildMoveTable(node.opponentMoves));
     }
-    if (node.opponentMoves.length === 0) movelist.insertAdjacentHTML('beforeend', `<div class="hint">End of prepared theory for this line.</div>`);
   } else {
     movelist.insertAdjacentHTML('beforeend', `<div class="hint">End of prepared theory for this line.</div>`);
   }

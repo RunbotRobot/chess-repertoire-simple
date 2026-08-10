@@ -37,6 +37,7 @@
 // feeds the unmodified minimax propagation, every deeper node inherits the
 // same protection, not just the root.
 import { Chess } from '../js/vendor/chess.esm.js';
+import { wilsonLowerBound } from '../js/chessUtil.js';
 
 // Positions are keyed by the FEN fields that actually define board state —
 // piece placement, side to move, castling rights, en passant target —
@@ -525,36 +526,6 @@ function tallyResult(node, result) {
 
 function sideToMove(fen) {
   return fen.split(' ')[1] === 'w' ? 'white' : 'black';
-}
-
-// The 95% Wilson score interval lower bound for a proportion — the
-// standard fix for "a small sample's raw rate can't be trusted at face
-// value against a much larger one." A move with 50 games at 60% wins and a
-// move with 72,000 games at 50% wins are NOT equally trustworthy point
-// estimates, but the raw win-rate leaf formula this replaced treated them
-// as such — which is exactly what let an obscure, barely-tested move (1.h3
-// on 50 real games) outrank 1.e4 (72,488 games) in a real end-to-end run.
-// Wilson fixes this by reporting the pessimistic end of a confidence
-// interval instead of the raw rate: a small sample's interval is wide, so
-// its lower bound sits well below its raw rate; a huge sample's interval
-// is razor-narrow, so its lower bound sits almost exactly AT its raw rate.
-// Ranking by lower bound instead of raw rate is the same technique behind
-// "best comment" sorting on Reddit/Stack Overflow and IMDb's weighted
-// rating — a handful of lucky results can't outrank a large, consistent
-// sample just because their raw average happens to be higher.
-// z=1.96 is the conventional 95%-confidence z-score.
-function wilsonLowerBound(wins, total, z = 1.96) {
-  if (total <= 0) return 0;
-  const p = wins / total;
-  const z2 = z * z;
-  const denominator = 1 + z2 / total;
-  const center = p + z2 / (2 * total);
-  const margin = z * Math.sqrt((p * (1 - p)) / total + z2 / (4 * total * total));
-  // Mathematically always >= 0, but floating-point rounding can land a
-  // hair below zero for a 0-win sample (center and margin cancel exactly
-  // in theory, not quite in float arithmetic) — clamp rather than let a
-  // probability print as "-0%".
-  return Math.max(0, (center - margin) / denominator);
 }
 
 // Draws count as zero for BOTH colors' own-score formulas, independently —

@@ -78,6 +78,33 @@
   .movebtn.correct{border-color:var(--good);background:#173824;}
   .movebtn.incorrect{border-color:var(--bad);background:#3a1c1c;}
 
+  /* Browse's move table: one row per candidate move (mine + alternates, or
+     the opponent's kept replies), same columns either way. The header is
+     sticky within its own scroll box (.movetable-wrap) rather than the
+     page at large, so it reliably stays visible while scrolling through a
+     long list of rows without needing to repeat column labels inline on
+     every row -- the point being to save horizontal width on a narrow
+     phone screen, not just vertical convenience. */
+  .movetable-wrap{overflow:auto;max-height:56vh;border:1px solid var(--line);border-radius:8px;
+    -webkit-overflow-scrolling:touch;}
+  .movetable{width:100%;border-collapse:collapse;font-size:13px;table-layout:fixed;}
+  .movetable col.col-move{width:28%;}
+  .movetable col.col-stat{width:14.4%;}
+  .movetable th{position:sticky;top:0;background:var(--panel-2);text-align:right;font-weight:600;
+    font-size:10.5px;color:var(--muted);text-transform:uppercase;letter-spacing:.3px;
+    padding:7px 6px;border-bottom:1px solid var(--line);}
+  .movetable th:first-child{text-align:left;}
+  .movetable td{padding:8px 6px;border-bottom:1px solid var(--line);text-align:right;
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+  .movetable tbody tr:last-child td{border-bottom:none;}
+  .movetable td:first-child{text-align:left;font-weight:600;color:var(--ink);}
+  .movetable tbody tr{cursor:pointer;}
+  .movetable tbody tr:hover td, .movetable tbody tr:active td{background:var(--panel-2);}
+  .movetable tbody tr.chosen td:first-child{color:var(--good);}
+  .movetable tbody tr.chosen td:first-child::after{content:" \2713";}
+  .movetable tbody tr.alt td{color:var(--muted);font-weight:400;}
+  .movetable tbody tr.alt td:first-child{color:var(--muted);}
+
   #quiz-live{position:fixed;inset:0;background:var(--bg);display:none;flex-direction:column;
     align-items:center;justify-content:center;z-index:50;transition:opacity .3s;}
   #quiz-live.active{display:flex;}

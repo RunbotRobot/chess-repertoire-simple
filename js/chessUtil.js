@@ -1,10 +1,43 @@
 // Helpers that sit between chess.js and the speech layer: turning a SAN move
 // into something worth saying out loud, and turning a rough voice transcript
 // back into a legal move. Also click-to-move's own from/to matching, shared
-// by Browse and manual quiz so both get the same castling behavior.
+// by Browse and manual quiz so both get the same castling behavior. Also
+// wilsonLowerBound (see below), shared with pipeline/algorithm.js so the
+// live Lichess Explorer path and the precomputed local-data path score
+// candidate moves with the exact same statistical adjustment.
 
 const PIECE_WORDS = { N: 'knight', B: 'bishop', R: 'rook', Q: 'queen', K: 'king' };
 const PIECE_LETTERS = Object.fromEntries(Object.entries(PIECE_WORDS).map(([l, w]) => [w, l]));
+
+// The 95% Wilson score interval lower bound for a proportion — the
+// standard fix for "a small sample's raw rate can't be trusted at face
+// value against a much larger one." A move with 50 games at 60% wins and a
+// move with 72,000 games at 50% wins are NOT equally trustworthy point
+// estimates, but a raw win-rate formula treats them as such — which is
+// exactly what let an obscure, barely-tested move (1.h3 on 50 real games)
+// outrank 1.e4 (72,488 games) in a real end-to-end pipeline run. Wilson
+// fixes this by reporting the pessimistic end of a confidence interval
+// instead of the raw rate: a small sample's interval is wide, so its lower
+// bound sits well below its raw rate; a huge sample's interval is
+// razor-narrow, so its lower bound sits almost exactly AT its raw rate.
+// Ranking by lower bound instead of raw rate is the same technique behind
+// "best comment" sorting on Reddit/Stack Overflow and IMDb's weighted
+// rating — a handful of lucky results can't outrank a large, consistent
+// sample just because their raw average happens to be higher.
+// z=1.96 is the conventional 95%-confidence z-score.
+export function wilsonLowerBound(wins, total, z = 1.96) {
+  if (total <= 0) return 0;
+  const p = wins / total;
+  const z2 = z * z;
+  const denominator = 1 + z2 / total;
+  const center = p + z2 / (2 * total);
+  const margin = z * Math.sqrt((p * (1 - p)) / total + z2 / (4 * total * total));
+  // Mathematically always >= 0, but floating-point rounding can land a
+  // hair below zero for a 0-win sample (center and margin cancel exactly
+  // in theory, not quite in float arithmetic) — clamp rather than let a
+  // probability print as "-0%".
+  return Math.max(0, (center - margin) / denominator);
+}
 
 // chess.js represents castling as the king's own two-square hop (e.g.
 // e1->g1 for White kingside) — that's what a move's `to` actually is, and
