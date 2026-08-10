@@ -46,17 +46,24 @@ async function ensureLoaded(color, settings, opts = {}) {
 }
 
 // Walks uciPath from the tree's root, following whichever of
-// myMove/replies matches each step -- both are populated exclusively by
-// selectRepertoire, so any path this module itself ever hands back out
-// (via translateNode's myMove.uci / opponentMoves[].uci) is guaranteed to
-// match one of these branches; returns null only for a path this source
-// never offered in the first place.
+// myMove/replies/alternates matches each step -- all three are populated
+// exclusively by selectRepertoire, so any path this module itself ever
+// hands back out (via translateNode's myMove.uci / opponentMoves[].uci /
+// alternates[].uci) is guaranteed to match one of these branches; returns
+// null only for a path this source never offered in the first place.
+// alternates carry a child exactly like myMove/replies do (see
+// algorithm.js's selectRepertoire) specifically so Browse can follow a
+// non-repertoire candidate — e.g. an opening move that scored lower than
+// the chosen one — all the way down to whatever leaf its score actually
+// came from, not just see its single top-level score/games.
 function findNode(root, uciPath) {
   let node = root;
   for (const uci of uciPath) {
     if (node.myMove && node.myMove.uci === uci) { node = node.myMove.child; continue; }
     const reply = node.replies?.find((r) => r.uci === uci);
     if (reply) { node = reply.child; continue; }
+    const alt = node.alternates?.find((a) => a.uci === uci);
+    if (alt) { node = alt.child; continue; }
     return null;
   }
   return node;
