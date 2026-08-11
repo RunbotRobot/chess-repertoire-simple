@@ -143,15 +143,40 @@ jobs:
               ) || echo "Checkpoint state push failed -- will retry at the next checkpoint, not fatal to the run."
             fi
             if [ -f ckpt/repertoire-white.json ]; then
-              mkdir -p repo/data
-              cp ckpt/repertoire-white.json ckpt/repertoire-black.json repo/data/
               (
                 cd repo
+                # repo/ is ONE checkout reused for this whole multi-hour job
+                # (unlike ckpt_push above, which is a fresh throwaway git init
+                # every time) -- so unlike that block, a failure in here can
+                # leave this checkout itself broken for every subsequent
+                # attempt, not just this one. That's exactly what happened in
+                # production: this job's checkout was already a commit or two
+                # stale by the time it actually started (queued behind the
+                # previous run under the concurrency lock while more
+                # checkpoints landed on main), so the first `git pull
+                # --rebase` here had to replay a full rewrite of a multi-MB
+                # JSON file against someone else's full rewrite of the same
+                # file -- almost guaranteed to conflict -- and the failed
+                # rebase left repo/ conflicted for the rest of the job, so
+                # EVERY later attempt failed the same silent way and main
+                # never got another update for hours despite ingestion
+                # itself running fine the whole time.
+                #
+                # These two files are always fully regenerated from scratch
+                # each checkpoint, so there's never anything locally worth
+                # merging -- fetch + hard-reset to origin's current tip
+                # before reapplying them instead of rebasing. Unlike a failed
+                # rebase, this can't leave the checkout stuck: whatever state
+                # it was in, this always ends at a clean copy of origin/main.
+                git rebase --abort 2>/dev/null || true
+                git fetch -q origin main
+                git checkout -q -B main origin/main
+                mkdir -p data
+                cp "$GITHUB_WORKSPACE/ckpt/repertoire-white.json" "$GITHUB_WORKSPACE/ckpt/repertoire-black.json" data/
                 git add data/repertoire-white.json data/repertoire-black.json
                 if ! git diff --cached --quiet; then
                   WHITE_PICK=$(node -e "const d=require('./data/repertoire-white.json');const r=d.nodes[d.rootKey];console.log((r.myMove?.san||'?')+' '+r.total+'g')")
                   git commit -q -m "Update repertoire checkpoint data ($(date -u +%Y-%m-%dT%H:%M:%SZ), white picks ${WHITE_PICK})"
-                  git pull -q --rebase origin main
                   git push -q origin main
                 fi
               ) || echo "Repertoire data push to main failed -- will retry at the next checkpoint, not fatal to the run."
