@@ -558,6 +558,77 @@ function leafScore(node, color) {
   return wilsonLowerBound(wins, node.total);
 }
 
+// A rare move can look like the objectively best choice for reasons that
+// have nothing to do with chess. Confirmed against the real July 2026
+// dataset in stages:
+//
+//   1. minGames alone (an ABSOLUTE game-count floor) can't distinguish "a
+//      real, established try" from "a fluke that happened to clear a low
+//      bar" -- 1.Na3, on just 25 total games, outscored 1.e4 (111,372
+//      games) because minGames=10 let it compete at all. Raising minGames
+//      doesn't fix this either (swept 10 through 1000): it just keeps
+//      handing the title to whichever OTHER under-explored move is
+//      currently least-refuted, never converging on the established ones.
+//   2. Requiring several qualifying replies (not just one) before trusting
+//      a comparison, or requiring they cover most of the position's
+//      traffic, both sound plausible but still don't converge: even 1.e4
+//      itself, two plies in, routinely offers 20+ technically-qualifying
+//      candidate replies each individually clearing minGames=10 on only
+//      10-15 games apiece -- comparing that many small, similarly-noisy
+//      Wilson estimates and taking the best is a "multiple comparisons"
+//      problem (the winner is more likely to be a lucky outlier than a
+//      real best move), and it recurs at every ply regardless of how
+//      popular the position above it is.
+//   3. A Bonferroni-style correction for exactly that (stricter confidence
+//      the more candidates being compared -- see git history for the
+//      inverseNormalCDF-based version this replaced) helped but never
+//      fully closed the gap even at absurd confidence levels, because
+//      minGames=10 lets traffic fragment across dozens of thin candidates
+//      at EVERY decision point regardless of the parent's own popularity.
+//
+// What actually works, verified against the real dataset down to a full,
+// completely recognizable main line (1.e4 e5 2.Bc4 Nc6 3.Nf3 Nf6 4.d3 Bc5
+// 5.Bg5 O-O): require each candidate to hold a minimum SHARE of its
+// parent's own traffic, not just an absolute count. This is the same idea
+// already used for opponent replies on the live-Explorer path (see
+// storage.js's opponentBranchMinShare) -- rare/unrefuted tries are exactly
+// the ones that fail a relative-popularity bar, at any depth, regardless
+// of how big the parent position's own total is; a forced recapture with
+// only one sensible reply still clears it trivially, since virtually all
+// of that position's traffic funnels through the one real option.
+//
+// 0.04 (not a lower value like 0.01-0.02) is a deliberate choice, made by
+// checking real output, not just whether SOME threshold stopped the worst
+// offenders: 0.01-0.03 still occasionally let a real-but-dubious sideline
+// through (e.g. black's repertoire picking 2...Qe6+ in the Scandinavian, a
+// known-inferior square for the queen versus the standard Qd6/Qa5/Qd8) --
+// 0.04 was the point where BOTH colors' full traced lines came out as
+// completely orthodox, nameable theory (white: 1.d4 d5 2.c4 e6 3.Nf3 Nf6
+// 4.Nc3 Bb4, a Ragozin; black vs 1.e4: c5 2.Nf3 e6 3.d4 cxd4 4.Nxd4 a6, a
+// Kan Sicilian). The real cost is breadth: fewer alternates and opponent
+// replies clear a stricter bar, so Browse/quiz coverage of "what if they
+// play something less common" narrows too -- a deliberate trade favoring
+// correctness given the app's own stated goal (objectively best move by
+// empirical theory) over showing every line someone has ever tried.
+const MIN_SHARE = 0.04;
+
+// Shared by scorePass, selectRepertoire, and selectRepertoireGraph so they
+// can never disagree about which children a node's minimax comparison is
+// allowed to trust — see MIN_SHARE's doc comment above for why
+// individually clearing minGames (child.total >= minGames) isn't enough
+// on its own.
+function qualifyingChildren(graph, node, minGames) {
+  const out = [];
+  for (const edge of node.children.values()) {
+    const child = graph.get(edge.key);
+    if (!child || child.total < minGames) continue;
+    const share = node.total > 0 ? (edge.games || 0) / node.total : 0;
+    if (share < MIN_SHARE) continue;
+    out.push({ edge, child });
+  }
+  return out;
+}
+
 /**
  * Backward minimax scoring pass for ONE color's repertoire (spec step 7).
  * Run this twice — once with color:'white', once with color:'black' — to
@@ -595,15 +666,6 @@ export function scorePass(graph, color, minGames) {
   const scores = new Map();
   const inProgress = new Set();
 
-  function qualifyingChildren(node) {
-    const out = [];
-    for (const edge of node.children.values()) {
-      const child = graph.get(edge.key);
-      if (child && child.total >= minGames) out.push({ edge, child });
-    }
-    return out;
-  }
-
   function score(key) {
     if (scores.has(key)) return scores.get(key).score;
     const node = graph.get(key);
@@ -616,7 +678,7 @@ export function scorePass(graph, color, minGames) {
     }
     inProgress.add(key);
 
-    const qualifying = qualifyingChildren(node);
+    const qualifying = qualifyingChildren(graph, node, minGames);
     let result;
     if (qualifying.length === 0) {
       result = { score: leafScore(node, color), isLeaf: true };
@@ -681,9 +743,7 @@ export function selectRepertoire(graph, scores, color, minGames, rootFen) {
     };
     if (!scored || scored.isLeaf) return base; // nothing below the threshold to select into
 
-    const qualifying = [...node.children.values()]
-      .map((edge) => ({ edge, child: graph.get(edge.key) }))
-      .filter(({ child }) => child && child.total >= minGames);
+    const qualifying = qualifyingChildren(graph, node, minGames);
 
     if (mover === color) {
       // Builder's own move: follow only the argmax/argmin child already
@@ -878,9 +938,7 @@ export function selectRepertoireGraph(graph, scores, color, minGames, rootFen) {
     nodes[key] = flat;
     if (!scored || scored.isLeaf) continue; // nothing below the threshold to select into
 
-    const qualifying = [...node.children.values()]
-      .map((edge) => ({ edge, child: graph.get(edge.key) }))
-      .filter(({ child }) => child && child.total >= minGames);
+    const qualifying = qualifyingChildren(graph, node, minGames);
 
     if (mover === color) {
       let best = null;
