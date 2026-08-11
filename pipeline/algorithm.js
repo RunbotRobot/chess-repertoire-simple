@@ -756,14 +756,38 @@ export function selectRepertoire(graph, scores, color, minGames, rootFen) {
 // win/draw/loss breakdown, not only the Wilson-adjusted number. `memo` is
 // shared across an entire selectRepertoireGraph call so a leaf reachable
 // from many different starting positions is only walked to once.
-function resolveLeafTally(graph, scores, minGames, color, startKey, memo) {
+// inProgress mirrors scorePass's own cycle guard (see its doc comment) --
+// necessary here too, and for the same underlying reason (real in-game
+// repetition), but NOT redundant with scorePass already having safely
+// terminated: scorePass's inProgress protection is scoped to each node's
+// OWN scoring call and cleared once that node's score is finalized, so
+// two nodes can still end up with final scores that point back at each
+// other as "best child" (whichever one scorePass happened to resolve
+// first treats the other as a leaf for that one call, but the other's
+// own later, independent scoring pass can still pick the first as ITS
+// best move). Greedily walking "best child" repeatedly, as this function
+// does, can then cycle between them forever -- reproduced in practice
+// against the real July 2026 dataset (a RangeError stack overflow at
+// ~1000 frames, all in this function). Default parameter (rather than a
+// required one) so every external call gets its own fresh set, while a
+// recursive call correctly threads the same one along its current chain.
+function resolveLeafTally(graph, scores, minGames, color, startKey, memo, inProgress = new Set()) {
   if (memo.has(startKey)) return memo.get(startKey);
   const node = graph.get(startKey);
+  if (inProgress.has(startKey)) {
+    // Cycle -- deliberately NOT memoized (unlike every other return below):
+    // this is a stand-in for THIS caller's sake only, not this key's real
+    // resolution. A later, non-cyclic call reaching the same key fresh
+    // (from outside the cycle, memo still empty for it) must still get its
+    // actual answer, not this fallback permanently cached over it.
+    return { total: node.total, whiteWins: node.whiteWins, draws: node.draws, blackWins: node.blackWins };
+  }
   const scored = scores.get(startKey);
   let result;
   if (!scored || scored.isLeaf) {
     result = { total: node.total, whiteWins: node.whiteWins, draws: node.draws, blackWins: node.blackWins };
   } else {
+    inProgress.add(startKey);
     const mover = sideToMove(node.fen);
     const maximizing = mover === color;
     let best = null;
@@ -774,8 +798,9 @@ function resolveLeafTally(graph, scores, minGames, color, startKey, memo) {
       if (best === null || (maximizing ? s > best.s : s < best.s)) best = { edge, s };
     }
     result = best
-      ? resolveLeafTally(graph, scores, minGames, color, best.edge.key, memo)
+      ? resolveLeafTally(graph, scores, minGames, color, best.edge.key, memo, inProgress)
       : { total: node.total, whiteWins: node.whiteWins, draws: node.draws, blackWins: node.blackWins };
+    inProgress.delete(startKey);
   }
   memo.set(startKey, result);
   return result;
