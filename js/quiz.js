@@ -66,6 +66,7 @@ export class QuizSession {
         await this.handlers.onOpponentMove?.({
           san: chosen.san, uci: chosen.uci, fen: chess.fen(),
           games: chosen.games, share: chosen.share, opponentMoves: node.opponentMoves,
+          parentGames: node.games,
         });
         uciPath.push(chosen.uci);
         node = await this.getNode(uciPath);
@@ -92,7 +93,9 @@ export class QuizSession {
         fen: chess.fen(), // post-move fen when correct; unchanged (pre-move) fen on a miss
         games: node.myMove.games,
         score: node.myMove.score,
+        myMove: node.myMove,
         alternates: node.alternates,
+        parentGames: node.games,
       });
 
       if (!correct) {
@@ -155,7 +158,7 @@ handlers shape:
   onLineStart({color}) -> Promise<void>                fires once, before a fresh line begins (not before a
                                                         memorization replay); useful to announce the color
                                                         when quizzing "both" repertoires in one session
-  onOpponentMove({san, uci, fen, games, share, opponentMoves}) -> Promise<void>
+  onOpponentMove({san, uci, fen, games, share, opponentMoves, parentGames}) -> Promise<void>
                                                         announce the opponent's move (voice) or render it
                                                         (board/text), resolve when done. fen is the position
                                                         after this move; uci is handy for board highlighting.
@@ -165,18 +168,24 @@ handlers shape:
                                                         shows "what else could they have played," which must stay
                                                         about the move that was *just* played, one step behind
                                                         whatever's currently being quizzed, or it'd give the
-                                                        answer away.
+                                                        answer away. parentGames is the total games at that same
+                                                        position, the same "games at this position" figure Browse
+                                                        shows above its own move table.
   onAwaitingUserMove({fen, legalMoves, correctSan}) -> Promise<string san>
                                                         collect the user's move (voice or on-screen), resolve
                                                         with the SAN it matched (or a value that won't match
                                                         correctSan, e.g. '', on timeout/giveup)
-  onResult({correct, correctSan, correctUci, userSan, fen, games, score, alternates}) -> Promise<void>
+  onResult({correct, correctSan, correctUci, userSan, fen, games, score, myMove, alternates, parentGames}) -> Promise<void>
                                                         confirm / reveal the correct move. fen reflects the
                                                         position after the move when correct, or is unchanged
                                                         (pre-move) on a miss, so a board can be kept in sync.
-                                                        games/score/alternates describe the move just answered
-                                                        (score is the win rate that made it the repertoire pick,
-                                                        alternates the other candidates) — meaningful only when
+                                                        games/score/myMove/alternates/parentGames describe the
+                                                        move just answered (score is the win rate that made it
+                                                        the repertoire pick; myMove is that same candidate's full
+                                                        stat entry — same shape as alternates' entries and as
+                                                        Browse's own move-table rows — so a caller can build
+                                                        [myMove, ...alternates] and hand it straight to the same
+                                                        table renderer Browse uses) — meaningful only when
                                                         correct, same reasoning as onOpponentMove's stats: this is
                                                         about the move that just resolved, not the one now being
                                                         asked about.

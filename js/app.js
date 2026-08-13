@@ -15,7 +15,7 @@ import { Chess } from './vendor/chess.esm.js';
 // devtools is actually running the latest code, and it also drives the
 // service worker's cache name (see sw.js) so updates actually take effect
 // instead of being served stale from the offline cache.
-export const APP_VERSION = 46;
+export const APP_VERSION = 47;
 
 const COLOR_OPTIONS = ['white', 'black'];
 const RATING_OPTIONS = ['1000', '1200', '1400', '1600', '1800', '2000', '2200', '2500'];
@@ -462,8 +462,13 @@ function sortMoveEntries(entries) {
 // count for the whole position is shown once, above the table, via
 // gamesTotalHint) — both to keep rows compact on a narrow phone screen.
 // chosenUci marks the repertoire's actual pick (my decision points only —
-// the opponent has no "chosen" move, every kept reply is equally real).
-function buildMoveTable(entries, { chosenUci } = {}) {
+// the opponent has no "chosen" move, every kept reply is equally real) —
+// or, from the quiz history panel, the move that was actually played in
+// that specific line, opponent replies included. onRowClick is Browse's
+// click-to-navigate-deeper behavior; omitted by the quiz history panel,
+// which is a read-only look back at a position already played through,
+// not another place to wander off into Browse's own navigation state.
+function buildMoveTable(entries, { chosenUci, onRowClick } = {}) {
   const wrap = document.createElement('div');
   wrap.className = 'movetable-wrap';
   const table = document.createElement('table');
@@ -491,7 +496,8 @@ function buildMoveTable(entries, { chosenUci } = {}) {
     if (chosenUci) tr.className = m.uci === chosenUci ? 'chosen' : 'alt';
     tr.innerHTML = `<td>${m.san}</td><td>${formatStat(m.score)}</td><td>${formatStat(m.winRate)}</td>` +
       `<td>${formatStat(m.drawRate)}</td><td>${formatStat(m.lossRate)}</td><td>${formatStat(m.share)}</td>`;
-    tr.addEventListener('click', () => { browsePath = [...browsePath, m]; browseSelectedSquare = null; renderBrowse(); });
+    if (onRowClick) tr.addEventListener('click', () => onRowClick(m));
+    else tr.style.cursor = 'default';
     tbody.appendChild(tr);
   }
   table.appendChild(tbody);
@@ -556,15 +562,16 @@ async function renderBrowse() {
     return;
   }
 
+  const browseOnRowClick = (m) => { browsePath = [...browsePath, m]; browseSelectedSquare = null; renderBrowse(); };
   if (node.myMove) {
     movelist.appendChild(gamesTotalHint(node.games));
-    movelist.appendChild(buildMoveTable([node.myMove, ...(node.alternates || [])], { chosenUci: node.myMove.uci }));
+    movelist.appendChild(buildMoveTable([node.myMove, ...(node.alternates || [])], { chosenUci: node.myMove.uci, onRowClick: browseOnRowClick }));
   } else if (node.opponentMoves) {
     if (node.opponentMoves.length === 0) {
       movelist.insertAdjacentHTML('beforeend', `<div class="hint">End of prepared theory for this line.</div>`);
     } else {
       movelist.appendChild(gamesTotalHint(node.games));
-      movelist.appendChild(buildMoveTable(node.opponentMoves));
+      movelist.appendChild(buildMoveTable(node.opponentMoves, { onRowClick: browseOnRowClick }));
     }
   } else {
     movelist.insertAdjacentHTML('beforeend', `<div class="hint">End of prepared theory for this line.</div>`);
@@ -631,13 +638,21 @@ for (const id of ['#manual-copy-pgn-btn', '#copy-pgn-quiz-live']) {
 }
 
 // Manual-mode-only: a record of each move actually played in the current
-// line, along with the win rate / alternates (mine) or share / other
-// replies (opponent's) that were live at the moment it was chosen — shown
-// on the quiz screen for the *previous* move only (never the position
-// currently being quizzed, which would just be showing the answer), with
-// buttons to step back through earlier moves in the same line. Scoped to
-// manual mode: this is a "look, don't tell" screen feature, and voice mode
-// is meant to run screen-off, so there's no natural place for it there.
+// line, shown on the quiz screen for the *previous* move only (never the
+// position currently being quizzed, which would just be showing the
+// answer), with buttons to step back through earlier moves in the same
+// line. Scoped to manual mode: this is a "look, don't tell" screen
+// feature, and voice mode is meant to run screen-off, so there's no
+// natural place for it there.
+//
+// entries/chosenUci/parentGames carry the SAME shape buildMoveTable/
+// gamesTotalHint already use for Browse -- quiz.js's onResult passes
+// myMove alongside alternates specifically so [myMove, ...alternates]
+// reproduces Browse's own [node.myMove, ...node.alternates] input exactly,
+// and onOpponentMove's opponentMoves is already the full kept-reply list
+// Browse itself renders. So the position the user is looking back at
+// shows identical numbers here as it would in Browse, not a
+// separately-maintained, easier-to-drift-out-of-sync summary.
 let lineHistory = [];
 let historyViewIndex = -1;
 
@@ -667,28 +682,14 @@ function renderManualHistoryPanel() {
   const list = $('#manual-history-list');
   list.innerHTML = '';
 
-  const headEl = document.createElement('div');
-  headEl.className = 'movebtn mine';
-  headEl.innerHTML = entry.mover === 'me'
-    ? `<span>You played ${entry.san}</span><span class="pct">${entry.games} games, ${(entry.score * 100).toFixed(0)}% win rate</span>`
-    : `<span>Opponent played ${entry.san}</span><span class="pct">${entry.games} games, ${(entry.share * 100).toFixed(0)}% of replies</span>`;
-  list.appendChild(headEl);
+  const headline = document.createElement('div');
+  headline.className = 'hint';
+  headline.style.marginBottom = '6px';
+  headline.textContent = entry.mover === 'me' ? `You played ${entry.san}` : `Opponent played ${entry.san}`;
+  list.appendChild(headline);
 
-  if (entry.siblings.length > 0) {
-    const label = document.createElement('div');
-    label.className = 'hint';
-    label.style.marginTop = '8px';
-    label.textContent = entry.mover === 'me' ? 'Other candidates:' : 'Other replies:';
-    list.appendChild(label);
-    for (const alt of entry.siblings) {
-      const altEl = document.createElement('div');
-      altEl.className = 'movebtn alt';
-      altEl.innerHTML = entry.mover === 'me'
-        ? `<span>${alt.san}</span><span class="pct">${alt.games} games, ${(alt.score * 100).toFixed(0)}% score</span>`
-        : `<span>${alt.san}</span><span class="pct">${alt.games} games, ${(alt.share * 100).toFixed(0)}%</span>`;
-      list.appendChild(altEl);
-    }
-  }
+  list.appendChild(gamesTotalHint(entry.parentGames));
+  list.appendChild(buildMoveTable(entry.entries, { chosenUci: entry.chosenUci }));
 }
 
 $('#manual-history-back')?.addEventListener('click', () => {
@@ -1064,13 +1065,13 @@ async function startManualQuiz(quizMode) {
       manualLastMove = null;
       $('#manual-status').textContent = quizMode === 'both' ? `New line — ${cap(color)} to move first.` : 'New line.';
     },
-    onOpponentMove: async ({ san, uci, fen, games, share, opponentMoves }) => {
+    onOpponentMove: async ({ san, uci, fen, opponentMoves, parentGames }) => {
       hideFetchProgress('manual-fetch-progress');
       manualCurrentFen = fen;
       manualLegalMoves = [];
       manualSelectedSquare = null;
       recordLineMove(san);
-      pushLineHistory({ mover: 'opponent', san, games, share, siblings: opponentMoves.filter((m) => m.uci !== uci) });
+      pushLineHistory({ mover: 'opponent', san, entries: opponentMoves, chosenUci: uci, parentGames });
       renderManualBoard(fen, { from: uci.slice(0, 2), to: uci.slice(2, 4) });
       $('#manual-status').textContent = `Opponent played ${san}. Your move.`;
     },
@@ -1091,14 +1092,14 @@ async function startManualQuiz(quizMode) {
         if (!manualRunning) resolve(ABORT);
       });
     },
-    onResult: async ({ correct, correctSan, correctUci, fen, games, score, alternates }) => {
+    onResult: async ({ correct, correctSan, correctUci, fen, myMove, alternates, parentGames }) => {
       manualLegalMoves = [];
       manualSelectedSquare = null;
       const lastMove = { from: correctUci.slice(0, 2), to: correctUci.slice(2, 4) };
       if (correct) {
         manualCurrentFen = fen;
         recordLineMove(correctSan);
-        pushLineHistory({ mover: 'me', san: correctSan, games, score, siblings: alternates });
+        pushLineHistory({ mover: 'me', san: correctSan, entries: [myMove, ...alternates], chosenUci: correctUci, parentGames });
         renderManualBoard(fen, lastMove);
         $('#manual-status').textContent = `Correct — ${correctSan}.`;
         return;
@@ -1118,7 +1119,7 @@ async function startManualQuiz(quizMode) {
       // screen, still showing stats for a move that's now two moves back.
       // Deliberately NOT recordLineMove()'d into the PGN, though: a missed
       // guess never actually happened in the line the way a real move did.
-      pushLineHistory({ mover: 'me', san: correctSan, games, score, siblings: alternates });
+      pushLineHistory({ mover: 'me', san: correctSan, entries: [myMove, ...alternates], chosenUci: correctUci, parentGames });
       renderManualBoard(manualCurrentFen, lastMove);
       $('#manual-status').textContent = `Not quite — the move was ${correctSan}. Tap Continue when ready.`;
       await waitForManualContinue();
