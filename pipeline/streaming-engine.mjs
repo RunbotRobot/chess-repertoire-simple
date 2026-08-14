@@ -65,11 +65,14 @@ function tallyResult(node, result) {
 }
 
 /**
- * @param {{maxPlies?: number, minGames?: number, fetchGamesBatch: (gameIds: string[]) => Promise<Map<string,{result:string,moves:string[]}>>, initialNodes?: Map, initialPending?: object, onRound?: (stats:{round:number,toRegister:number,fetched:number,queueLength:number}) => void, onFetch?: (stats:{completed:number,total:number,phase:'register'|'drain'}) => void}} opts
+ * @param {{maxPlies?: number, minGames?: number, fetchGamesBatch: (gameIds: string[]) => Promise<Map<string,{result:string,moves:string[]}>>, initialNodes?: Map, initialPending?: object, movesCacheCap?: number, onRound?: (stats:{round:number,toRegister:number,fetched:number,queueLength:number}) => void, onFetch?: (stats:{completed:number,total:number,phase:'register'|'drain'}) => void}} opts
  *   fetchGamesBatch is required -- given a list of Lichess game ids,
  *   resolve every one of them (throwing if any is missing from the
  *   result, rather than silently skipping, so a fetch failure surfaces
  *   loudly instead of quietly losing a game).
+ *   movesCacheCap bounds the builder-lifetime LRU cache of fetched games'
+ *   moves (default 50000) -- see its declaration below for why this is
+ *   capped rather than unconditional.
  *   onRound/onFetch are both optional, purely-observational progress hooks
  *   into finish() -- a single call can run for a long time on a real
  *   month-scale cold-start backlog, entirely inside network awaits a
@@ -87,6 +90,49 @@ export function createStreamingGraphBuilder(opts) {
   const pendingByTarget = new Map();
   let nextRecordId = 0;
   let gameCount = 0;
+
+  // Caps how many records one round registers -- without this, a round on
+  // a real month-scale backlog can mean a single ~5-hour uninterruptible
+  // fetch (measured: 1548 batches in one round), which defeats deadlineMs
+  // below entirely: the deadline is only ever checked BETWEEN rounds, so
+  // an unbounded round makes that check meaningless. 300 matches
+  // MAX_IDS_PER_REQUEST (lichess-fetch.mjs) -- each record needs at most
+  // one distinct game id, so this bounds a round to roughly one HTTP
+  // batch's worth of fetch time regardless of total backlog size. Declared
+  // up here (not just above finish()) because movesCacheCap's floor below
+  // depends on it.
+  const REGISTER_BATCH_CAP = 300;
+
+  // Fetched games' moves, keyed by gameId -- lives for the builder's whole
+  // life (not just one finish() call) so a game that gets parked, resolved,
+  // and re-parked again later (a fresh record, chainRegistered: false) --
+  // or one whose chain registration and eventual resolution straddle
+  // separate checkpoints' finish() calls -- doesn't pay for the same
+  // Lichess fetch twice within a single job run. Bounded LRU, not
+  // unconditional retention: most parked games never resolve at all (98.8%
+  // measured, see this file's header), so caching every game ever fetched
+  // for the rest of the run would just recreate the RAM blowup this whole
+  // engine exists to avoid. A cache miss just costs one more fetch, exactly
+  // like today's behavior already tolerates -- this only ever improves
+  // throughput, never affects correctness -- EXCEPT the cap must stay well
+  // above REGISTER_BATCH_CAP: one round fetches up to REGISTER_BATCH_CAP
+  // games and then synchronously registers all of them assuming every one
+  // just stays cached for that whole pass, so a cap smaller than the
+  // round's own batch could evict an entry the same round still needs
+  // before it's read back. Floored (not just defaulted) so a caller can't
+  // configure that crash in by passing something too small.
+  const movesCacheCap = Math.max(REGISTER_BATCH_CAP * 4, Number.isFinite(opts.movesCacheCap) ? opts.movesCacheCap : 50000);
+  const movesCache = new Map();
+  function cacheMoves(gameId, data) {
+    movesCache.delete(gameId);
+    movesCache.set(gameId, data);
+    if (movesCache.size > movesCacheCap) movesCache.delete(movesCache.keys().next().value);
+  }
+  function getCachedMoves(gameId) {
+    const data = movesCache.get(gameId);
+    if (data) { movesCache.delete(gameId); movesCache.set(gameId, data); } // bump recency
+    return data;
+  }
   // Maintained incrementally (not recomputed by scanning pendingByFrom,
   // which can hold hundreds of thousands of entries on a real month-scale
   // run) so callers can cheaply throttle feeding against it -- see
@@ -148,10 +194,20 @@ export function createStreamingGraphBuilder(opts) {
     return toNode;
   }
 
-  function park(gameId, result, plyIndex, fen) {
+  // moves is cached here (not just fetched lazily later) because the
+  // caller -- feedGame() on a game's first park, advance() on a re-park --
+  // already has it in hand for free: feedGame() is handed the game's own
+  // moves straight from the parsed dump, and advance() is mid-walk through
+  // that same array. Caching it now means registerChain() for THIS episode
+  // never needs a Lichess fetch at all, not even the "first" one -- only a
+  // cache eviction (LRU, see movesCacheCap above) or a resume from a
+  // checkpoint (which never persisted moves, only {gameId, plyIndex, fen})
+  // ever forces an actual re-fetch.
+  function park(gameId, result, plyIndex, fen, moves) {
     const record = { id: nextRecordId++, gameId, result, plyIndex, fen, consumed: false, chainRegistered: false };
     addPending(pendingByFrom, positionKey(fen), record);
     activePendingCount++;
+    cacheMoves(gameId, { result, moves });
   }
 
   function feedGame(game) {
@@ -162,7 +218,7 @@ export function createStreamingGraphBuilder(opts) {
     for (let plyIndex = 0; plyIndex < plies; plyIndex++) {
       const fromNode = getOrCreate(chess.fen());
       if (plyIndex > 0 && fromNode.total < minGames) {
-        park(game.id, game.result, plyIndex, chess.fen());
+        park(game.id, game.result, plyIndex, chess.fen(), game.moves);
         return;
       }
       applyOneMoveSimple(game.id, game.result, game.moves, chess, plyIndex);
@@ -182,16 +238,16 @@ export function createStreamingGraphBuilder(opts) {
     for (; plyIndex < plies; plyIndex++) {
       const fromNode = getOrCreate(chess.fen());
       if (plyIndex > 0 && fromNode.total < minGames) {
-        park(gameId, result, plyIndex, chess.fen());
+        park(gameId, result, plyIndex, chess.fen(), moves);
         return;
       }
       applyOneMove(gameId, result, moves, chess, plyIndex);
     }
   }
 
-  function registerChain(record, movesCache) {
+  function registerChain(record) {
     record.chainRegistered = true;
-    const { moves } = movesCache.get(record.gameId);
+    const { moves } = getCachedMoves(record.gameId);
     const startKey = positionKey(record.fen);
     const probe = new Chess(record.fen);
     const plies = Math.min(moves.length, maxPlies);
@@ -214,8 +270,8 @@ export function createStreamingGraphBuilder(opts) {
     }
   }
 
-  function runFastForward(record, targetKey, movesCache) {
-    const { moves } = movesCache.get(record.gameId);
+  function runFastForward(record, targetKey) {
+    const { moves } = getCachedMoves(record.gameId);
     const chess = new Chess(record.fen);
     let ply = record.plyIndex;
     while (positionKey(chess.fen()) !== targetKey) {
@@ -266,22 +322,24 @@ export function createStreamingGraphBuilder(opts) {
     }
   }
 
-  // Drains the work queue against movesCache, batch-fetching whatever
-  // turns out to be missing (an older, already-chain-registered record
-  // resumed via a fromList trigger has never had its moves fetched this
-  // finish() call) rather than failing -- deferring blocked items,
-  // fetching everything they're blocked on in one batch, then retrying.
-  async function drainQueue(movesCache) {
+  // Drains the work queue against the shared movesCache, batch-fetching
+  // whatever turns out to be missing (an older, already-chain-registered
+  // record resumed via a fromList trigger, possibly from a prior finish()
+  // call whose cache entry has since been evicted) rather than failing --
+  // deferring blocked items, fetching everything they're blocked on in one
+  // batch, then retrying.
+  async function drainQueue() {
     while (queueHead < queue.length) {
       const deferred = [];
       while (queueHead < queue.length) {
         const item = queue[queueHead++];
         const gameId = item.kind === 'advance' ? item.gameId : item.record.gameId;
-        if (!movesCache.has(gameId)) { deferred.push(item); continue; }
+        const cached = getCachedMoves(gameId);
+        if (!cached) { deferred.push(item); continue; }
         if (item.kind === 'advance') {
-          advance(item.gameId, item.result, movesCache.get(gameId).moves, new Chess(item.fen), item.plyIndex);
+          advance(item.gameId, item.result, cached.moves, new Chess(item.fen), item.plyIndex);
         } else {
-          runFastForward(item.record, item.targetKey, movesCache);
+          runFastForward(item.record, item.targetKey);
         }
       }
       if (deferred.length === 0) break;
@@ -291,23 +349,13 @@ export function createStreamingGraphBuilder(opts) {
       });
       for (const id of missingIds) {
         if (!fetched.has(id)) throw new Error(`fetchGamesBatch did not return game ${id} -- cannot resume a record without it`);
-        movesCache.set(id, fetched.get(id));
+        cacheMoves(id, fetched.get(id));
       }
       queue.push(...deferred);
     }
     queue.length = 0;
     queueHead = 0;
   }
-
-  // Caps how many records one round registers -- without this, a round on
-  // a real month-scale backlog can mean a single ~5-hour uninterruptible
-  // fetch (measured: 1548 batches in one round), which defeats deadlineMs
-  // below entirely: the deadline is only ever checked BETWEEN rounds, so
-  // an unbounded round makes that check meaningless. 300 matches
-  // MAX_IDS_PER_REQUEST (lichess-fetch.mjs) -- each record needs at most
-  // one distinct game id, so this bounds a round to roughly one HTTP
-  // batch's worth of fetch time regardless of total backlog size.
-  const REGISTER_BATCH_CAP = 300;
 
   // Runs reconciliation: each round batch-fetches up to REGISTER_BATCH_CAP
   // not-yet-registered records' moves, registers them (which may cascade
@@ -339,7 +387,6 @@ export function createStreamingGraphBuilder(opts) {
     const deadlineMs = finishOpts.deadlineMs;
     let round = 0;
     const maxRounds = gameCount * 4 + 1000;
-    const movesCache = new Map();
     for (;;) {
       if (deadlineMs !== undefined && Date.now() > deadlineMs) return nodes;
       if (++round > maxRounds) {
@@ -364,11 +411,11 @@ export function createStreamingGraphBuilder(opts) {
           });
           for (const id of neededIds) {
             if (!fetched.has(id)) throw new Error(`fetchGamesBatch did not return game ${id} -- cannot register its transposition chain without it`);
-            movesCache.set(id, fetched.get(id));
+            cacheMoves(id, fetched.get(id));
           }
         }
         for (const record of needRegistration) {
-          if (!record.consumed) registerChain(record, movesCache);
+          if (!record.consumed) registerChain(record);
         }
       }
       // Reconciliation on a real month-scale dataset can run long enough
@@ -379,7 +426,7 @@ export function createStreamingGraphBuilder(opts) {
       // never awaits anything and callers can't see inside a single finish()
       // call any other way.
       opts.onRound?.({ round, toRegister: needRegistration.length, toRegisterTotal: needRegistrationAll.length, fetched: fetchCount, queueLength: queue.length - queueHead });
-      await drainQueue(movesCache);
+      await drainQueue();
     }
     return nodes;
   }

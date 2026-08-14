@@ -25,12 +25,17 @@
 // games end up permanently parked (measured: 98.8% on the real January
 // 2013 dump), and holding every one of their full move lists in memory
 // for the rest of the run doesn't scale -- see streaming-engine.mjs's own
-// header comment for the full rationale. Parked games here are tracked as
-// lightweight {gameId, plyIndex, fen} records with no move list; resuming
-// one fetches its PGN on demand, in batches, from Lichess's per-game
-// export API (pipeline/lichess-fetch.mjs) -- so this needs real network
-// access to Lichess (beyond the initial dump download) whenever it's
-// actually reconciling, not just while streaming the dump.
+// header comment for the full rationale. The *serialized checkpoint*
+// (pending.json, written below) is lightweight {gameId, plyIndex, fen}
+// records with no move list, so resuming from a restart always fetches
+// each still-parked game's PGN on demand from Lichess's per-game export
+// API (pipeline/lichess-fetch.mjs). Within a single job run, though, a
+// parked game's moves stay cached in memory from the moment it's first
+// parked (streaming-engine.mjs's movesCache) -- so ordinary reconciliation
+// of a game parked and resolved without an intervening restart costs zero
+// Lichess calls. This still needs real network access to Lichess whenever
+// it's reconciling something that crossed a restart boundary or fell out
+// of that cache, not just while streaming the dump.
 //
 // Local ingestion throughput (measured on the real July 2026 dump: ~1500
 // games/s) vastly outpaces how fast parked games can be politely
