@@ -119,9 +119,22 @@ export function createStreamingGraphBuilder(opts) {
   // games and then synchronously registers all of them assuming every one
   // just stays cached for that whole pass, so a cap smaller than the
   // round's own batch could evict an entry the same round still needs
-  // before it's read back. Floored (not just defaulted) so a caller can't
-  // configure that crash in by passing something too small.
-  const movesCacheCap = Math.max(REGISTER_BATCH_CAP * 4, Number.isFinite(opts.movesCacheCap) ? opts.movesCacheCap : 50000);
+  // before it's read back -- registerChain() now degrades gracefully on a
+  // miss rather than crashing (see its own doc comment), so this floor is
+  // no longer a correctness requirement, just keeps a caller from
+  // configuring needless eviction churn on a tiny cap.
+  //
+  // Default sized against a REAL production backlog, not a guess: the
+  // pending count this was measured against sat around 390000 for days,
+  // and 50000 (the original default) meant every entry aged out roughly
+  // every ~166 rounds (50000 / REGISTER_BATCH_CAP) -- far short of the
+  // ~1300 rounds needed to register a 390000-record backlog even once, so
+  // most registrations were paying for a refetch anyway, defeating most of
+  // the point of caching at all. 500000 comfortably covers that scale
+  // (a few hundred MB of {result, moves} entries) while staying two orders
+  // of magnitude below the "every game ever parked over a whole month"
+  // figure (100+GB) that motivated discarding moves in the first place.
+  const movesCacheCap = Math.max(REGISTER_BATCH_CAP * 4, Number.isFinite(opts.movesCacheCap) ? opts.movesCacheCap : 500000);
   const movesCache = new Map();
   function cacheMoves(gameId, data) {
     movesCache.delete(gameId);
@@ -245,9 +258,24 @@ export function createStreamingGraphBuilder(opts) {
     }
   }
 
+  // Returns false (record left unregistered, chainRegistered still false)
+  // if the moves aren't cached -- this DOES happen in production, not just
+  // in theory: two different records can share a gameId (their game
+  // pauses, resumes, and re-parks more than once), and by the time a
+  // later-queued one of them reaches the front of needRegistration, the
+  // earlier one's cacheMoves() call for that same gameId can have aged out
+  // under LRU pressure from everything registered in between. A miss here
+  // just means this record retries next round (needRegistrationAll picks
+  // it back up unchanged), paying for one more fetch -- crashing the whole
+  // run over a cache eviction (a real incident: 3+ days of every attempt
+  // dying on this exact TypeError, always resuming from the same stale
+  // checkpoint since it never got far enough to save a new one) is the
+  // actual bug, not a rare data corruption.
   function registerChain(record) {
+    const cached = getCachedMoves(record.gameId);
+    if (!cached) return false;
     record.chainRegistered = true;
-    const { moves } = getCachedMoves(record.gameId);
+    const { moves } = cached;
     const startKey = positionKey(record.fen);
     const probe = new Chess(record.fen);
     const plies = Math.min(moves.length, maxPlies);
