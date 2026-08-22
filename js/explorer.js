@@ -270,65 +270,52 @@ function computeNodeFromRaw(data, color, ply, settings) {
 
   const isMyMove = (ply % 2 === 0) === (color === 'white');
 
+  // Final tiebreaker once games (and, for the scored path, score) are
+  // exactly equal — MUST be deterministic, not random. computeNodeFromRaw
+  // is a pure function recomputed fresh on every single read (see this
+  // function's own header comment: "cheap to recompute on every read"),
+  // not memoized against the cached raw data — so a random tiebreak here
+  // meant the SAME position could answer with a DIFFERENT "correct" move
+  // on different calls. That's not just a cosmetic inconsistency: quiz.js's
+  // memorization replay (playNextLine) re-derives myMove.san fresh via a
+  // second getNode() call rather than reusing the first playthrough's
+  // answer, so a tied position could show one move as correct during the
+  // original line and a different one during its own immediate replay of
+  // that exact line — a real bug reported in production. UCI is stable and
+  // always present, so sorting by it breaks any remaining tie the same way
+  // every time, for the same input data, regardless of when or how many
+  // times this runs.
+  const byUci = (a, b) => (a.uci < b.uci ? -1 : a.uci > b.uci ? 1 : 0);
+
   if (isMyMove) {
     if (frequencyMode) {
       // Whichever move has actually been played the most, full stop — no
       // score involved (moveStats still computes one, since Browse shows it
-      // for reference, but it plays no role in picking). Ties broken
-      // uniformly at random via reservoir sampling, same technique as the
-      // scored path below.
-      let best = null;
-      let tieCount = 0;
-      for (const m of moves) {
-        const candidate = moveStats(m, color, totalGames);
-        if (candidate.games === 0) continue;
-        if (!best || candidate.games > best.games) {
-          best = candidate;
-          tieCount = 1;
-        } else if (candidate.games === best.games) {
-          tieCount++;
-          if (Math.random() < 1 / tieCount) best = candidate;
-        }
-      }
+      // for reference, but it plays no role in picking).
+      const candidates = moves.map((m) => moveStats(m, color, totalGames)).filter((c) => c.games > 0);
+      candidates.sort((a, b) => b.games - a.games || byUci(a, b));
+      const best = candidates[0] ?? null;
       // Unreachable in practice: totalGames >= 1 here (see the leaf check
       // above) and totalGames is the sum of every move's own games, so at
       // least one move always has games > 0. Kept only for symmetry with
       // the scored path's own (real) no-qualifying-move case.
       if (!best) return { games: totalGames, myMove: null, alternates: [], opponentMoves: null, leafReason: 'no-qualifying-move' };
-      const alternates = moves
-        .map((m) => moveStats(m, color, totalGames))
-        .filter((c) => c !== best && c.games > 0)
-        .sort((a, b) => b.games - a.games);
-      return { games: totalGames, myMove: best, alternates, opponentMoves: null, leafReason: null };
+      return { games: totalGames, myMove: best, alternates: candidates.slice(1), opponentMoves: null, leafReason: null };
     }
     // Score every candidate by its Wilson-adjusted win rate (moveStats
     // above) rather than the raw rate — the fix for the exact anomaly
     // pipeline/algorithm.js documents (a 50-game 60%-win move outranking a
     // 72,488-game 50%-win move on raw rate alone). Ties go to the move
-    // with more games (more real-world testing of that line); if it's
-    // still tied after that, pick uniformly at random among the tied
-    // candidates (reservoir sampling — each survives with probability
-    // 1/(number of ties seen so far), which works out uniform without
-    // needing to collect the whole tied group first).
+    // with more games (more real-world testing of that line); any
+    // remaining tie breaks by byUci above.
     const candidates = [];
     for (const m of moves) {
       const n = (m.white || 0) + (m.draws || 0) + (m.black || 0);
       if (n < settings.minSampleSize) continue;
       candidates.push(moveStats(m, color, totalGames));
     }
-    candidates.sort((a, b) => b.score - a.score || b.games - a.games);
-
-    let best = null;
-    let tieCount = 0;
-    for (const candidate of candidates) {
-      if (!best || candidate.score > best.score || (candidate.score === best.score && candidate.games > best.games)) {
-        best = candidate;
-        tieCount = 1;
-      } else if (candidate.score === best.score && candidate.games === best.games) {
-        tieCount++;
-        if (Math.random() < 1 / tieCount) best = candidate;
-      }
-    }
+    candidates.sort((a, b) => b.score - a.score || b.games - a.games || byUci(a, b));
+    const best = candidates[0] ?? null;
     if (!best) {
       // totalGames cleared minSampleSize, but it was spread thin enough
       // across moves that no single one did on its own — e.g. 22 games
@@ -340,8 +327,7 @@ function computeNodeFromRaw(data, color, ply, settings) {
     // The other candidates aren't part of the repertoire (only one move is
     // ever quizzed per position), but Browse shows them for reference —
     // sorted the same way, highest-scoring first.
-    const alternates = candidates.filter((c) => c !== best);
-    return { games: totalGames, myMove: best, alternates, opponentMoves: null, leafReason: null };
+    return { games: totalGames, myMove: best, alternates: candidates.slice(1), opponentMoves: null, leafReason: null };
   }
 
   // Opponent's move. Frequency mode keeps every reply that was actually
