@@ -15,7 +15,7 @@ import { Chess } from './vendor/chess.esm.js';
 // devtools is actually running the latest code, and it also drives the
 // service worker's cache name (see sw.js) so updates actually take effect
 // instead of being served stale from the offline cache.
-export const APP_VERSION = 47;
+export const APP_VERSION = 48;
 
 const COLOR_OPTIONS = ['white', 'black'];
 const RATING_OPTIONS = ['1000', '1200', '1400', '1600', '1800', '2000', '2200', '2500'];
@@ -165,9 +165,10 @@ function populateVoices() {
 if (window.speechSynthesis) window.speechSynthesis.onvoiceschanged = populateVoices;
 
 function updateDataSourceVisibility() {
-  const isLocal = $$('input[name=dataSource]:checked')[0]?.value === 'local';
-  $('#localDataUrl-field').style.display = isLocal ? '' : 'none';
-  if (isLocal) renderLocalDataStatus();
+  const source = $$('input[name=dataSource]:checked')[0]?.value;
+  $('#localDataUrl-field').style.display = source === 'local' ? '' : 'none';
+  $('#frequency-field').style.display = source === 'frequency' ? '' : 'none';
+  if (source === 'local') renderLocalDataStatus();
 }
 $$('input[name=dataSource]').forEach((r) => r.addEventListener('change', updateDataSourceVisibility));
 
@@ -844,7 +845,7 @@ $('#start-quiz').addEventListener('click', async () => {
   const quizMode = quizColorRadios.find((r) => r.checked).value; // 'white' | 'black' | 'both'
   const inputMethod = quizInputRadios.find((r) => r.checked).value; // 'voice' | 'manual'
 
-  if (settings.dataSource === 'live' && !settings.lichessToken) {
+  if (settings.dataSource !== 'local' && !settings.lichessToken) {
     $('#quiz-mic-warn').textContent = 'No Lichess API token set — add one in Setup first.';
     return;
   }

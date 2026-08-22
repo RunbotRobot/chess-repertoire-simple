@@ -23,7 +23,7 @@ function writeJSON(key, value) {
 }
 
 export const DEFAULT_SETTINGS = {
-  dataSource: 'live',    // 'live' (Lichess Explorer API) | 'local' (precomputed file from pipeline/chunked-ingest.mjs)
+  dataSource: 'live',    // 'live' (Lichess Explorer API, scored) | 'frequency' (same API, unscored -- always the most-common move) | 'local' (precomputed file from pipeline/chunked-ingest.mjs)
   localDataUrl: './data', // folder URL to fetch repertoire-white.json / repertoire-black.json from, when dataSource is 'local'
   colors: ['white', 'black'],
   ratingBands: ['1600', '1800', '2000'], // lichess explorer rating buckets to pool together

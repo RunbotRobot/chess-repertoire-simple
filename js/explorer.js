@@ -240,11 +240,27 @@ function moveStats(m, color, totalGames) {
 // given the color/ply context and current scoring settings. No I/O, so it's
 // cheap to recompute on every read — meaning changing minSampleSize etc. in
 // Settings takes effect immediately against already-cached data.
+//
+// dataSource 'frequency' takes a completely different, much simpler path
+// through here: no Wilson scoring, no minSampleSize/opponentBranchMinShare
+// gating at all — myMove is just whichever move has been played most often,
+// and every opponent reply with at least one game is a candidate (weighted-
+// random selection at quiz time, in quiz.js's weightedPick, already favors
+// the common ones — filtering here first would just throw away realistic
+// rare-reply exposure). The only thing that ends a line is the position
+// itself having zero games. This exists specifically to quiz deep lines
+// *right now*, live against Lichess, while the scored 'local' pipeline is
+// still working through a real month of data — see this file's own header
+// and pipeline/chunked-ingest.mjs for why that takes so long. Deliberately
+// reuses this same function (and thus the same fetch/cache/escalation
+// machinery below) rather than a parallel implementation, since the only
+// actual difference is the selection policy, not how data gets fetched.
 function computeNodeFromRaw(data, color, ply, settings) {
   const moves = Array.isArray(data.moves) ? data.moves : [];
   const totalGames = moves.reduce((s, m) => s + (m.white || 0) + (m.draws || 0) + (m.black || 0), 0);
+  const frequencyMode = settings.dataSource === 'frequency';
 
-  if (totalGames < settings.minSampleSize || moves.length === 0) {
+  if (totalGames < (frequencyMode ? 1 : settings.minSampleSize) || moves.length === 0) {
     // Genuine data scarcity: the position itself doesn't have enough games,
     // full stop — leafReason lets the UI say exactly that rather than
     // guessing (see the other two leafReason cases below, where totalGames
@@ -255,6 +271,36 @@ function computeNodeFromRaw(data, color, ply, settings) {
   const isMyMove = (ply % 2 === 0) === (color === 'white');
 
   if (isMyMove) {
+    if (frequencyMode) {
+      // Whichever move has actually been played the most, full stop — no
+      // score involved (moveStats still computes one, since Browse shows it
+      // for reference, but it plays no role in picking). Ties broken
+      // uniformly at random via reservoir sampling, same technique as the
+      // scored path below.
+      let best = null;
+      let tieCount = 0;
+      for (const m of moves) {
+        const candidate = moveStats(m, color, totalGames);
+        if (candidate.games === 0) continue;
+        if (!best || candidate.games > best.games) {
+          best = candidate;
+          tieCount = 1;
+        } else if (candidate.games === best.games) {
+          tieCount++;
+          if (Math.random() < 1 / tieCount) best = candidate;
+        }
+      }
+      // Unreachable in practice: totalGames >= 1 here (see the leaf check
+      // above) and totalGames is the sum of every move's own games, so at
+      // least one move always has games > 0. Kept only for symmetry with
+      // the scored path's own (real) no-qualifying-move case.
+      if (!best) return { games: totalGames, myMove: null, alternates: [], opponentMoves: null, leafReason: 'no-qualifying-move' };
+      const alternates = moves
+        .map((m) => moveStats(m, color, totalGames))
+        .filter((c) => c !== best && c.games > 0)
+        .sort((a, b) => b.games - a.games);
+      return { games: totalGames, myMove: best, alternates, opponentMoves: null, leafReason: null };
+    }
     // Score every candidate by its Wilson-adjusted win rate (moveStats
     // above) rather than the raw rate — the fix for the exact anomaly
     // pipeline/algorithm.js documents (a 50-game 60%-win move outranking a
@@ -298,11 +344,14 @@ function computeNodeFromRaw(data, color, ply, settings) {
     return { games: totalGames, myMove: best, alternates, opponentMoves: null, leafReason: null };
   }
 
-  // Keep every reply that's genuinely common; I need to be ready for it.
+  // Opponent's move. Frequency mode keeps every reply that was actually
+  // played at all (share/game-count filtering is exactly the "worth
+  // preparing for" judgment this mode explicitly opts out of); the scored
+  // modes keep only replies common enough to be worth preparing for.
   const kept = moves
     .map((m) => moveStats(m, color, totalGames))
     .filter((m) => m.games > 0)
-    .filter((m) => m.share >= settings.opponentBranchMinShare || m.games >= settings.opponentBranchMinGames)
+    .filter((m) => frequencyMode || m.share >= settings.opponentBranchMinShare || m.games >= settings.opponentBranchMinGames)
     .sort((a, b) => b.games - a.games);
   if (kept.length === 0) {
     // Same idea on the opponent side: plenty of total games, but scattered

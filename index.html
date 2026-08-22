@@ -165,6 +165,7 @@
         <h3>Repertoire data source</h3>
         <div class="row" id="dataSource-row">
           <label class="chip"><input type="radio" name="dataSource" value="live" checked> Live (Lichess Explorer API)</label>
+          <label class="chip"><input type="radio" name="dataSource" value="frequency"> Frequency (most-common move, live)</label>
           <label class="chip"><input type="radio" name="dataSource" value="local"> Local (precomputed file)</label>
         </div>
         <div class="field" id="localDataUrl-field" style="display:none;">
@@ -179,6 +180,17 @@
           <div id="local-data-status" class="hint" style="margin-top:6px;">Not loaded yet.</div>
           <div class="btn-row" style="margin-top:8px;">
             <button class="btn secondary" id="refresh-local-data">Refresh local data</button>
+          </div>
+        </div>
+        <div class="field" id="frequency-field" style="display:none;">
+          <div class="hint">
+            No scoring, no "best move" judgment at all — your side always plays whichever move is most common in
+            Lichess's database at that position, and the opponent's replies are sampled weighted by how often
+            they're actually played. Nothing here tries to win or even draw, just to mimic what people actually
+            play, as deep as Lichess has any data for. Fetches live from the same Lichess Explorer API as Live
+            mode (same API token required, no local storage) — useful for quizzing real depth right now, while
+            Local mode's bulk ingestion pipeline is still working through a full month of games. The
+            scoring/pruning settings below don't apply in this mode either.
           </div>
         </div>
       </div>
