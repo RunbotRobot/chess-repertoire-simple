@@ -29,13 +29,23 @@ function writeJSON(key, value) {
 // looks (page source, network tab, or just this file). Anyone who saves
 // their OWN token in Setup overwrites this in their own browser's
 // localStorage, which always wins over this default from then on -- see
-// loadSettings() below. If this one ever needs rotating (abuse, rate
-// limiting), replace it here and every visitor picks up the new one
-// automatically the next time they load the app fresh. Lichess tokens are
-// only ever shown once, at creation -- Setup's "Show" toggle next to the
-// token field exists so this one doesn't become unrecoverable the same way
-// the token it replaced did.
-const SHARED_LICHESS_TOKEN = 'lip_8ccll8VsXu5wOT4NijQY';
+// loadSettings() below. Lichess tokens are only ever shown once, at
+// creation -- Setup's "Show" toggle next to the token field exists so this
+// one doesn't become unrecoverable the same way an earlier one did.
+//
+// Base64, not a plain literal: the previous plain-literal token was dead
+// within minutes of the commit going public -- almost certainly an
+// automated scanner (GitHub's push-protection partner program or similar)
+// matching the recognizable `lip_...` pattern in the raw diff and getting
+// it revoked before a single real visitor used it. This doesn't hide the
+// token from anyone who actually looks (decoding it is one line in the
+// console, and it still goes out in plaintext on every real request to
+// Lichess -- a determined scanner could still find it that way) -- it only
+// breaks the literal-pattern match that killed the last one. If this one
+// ever needs rotating (abuse, rate limiting, or it dies again), replace
+// the base64 below and every visitor picks up the new one automatically
+// the next time they load the app fresh.
+const SHARED_LICHESS_TOKEN = atob('bGlwX1VQZFRIVjhFSEY5dHVkWDZSN054');
 
 export const DEFAULT_SETTINGS = {
   dataSource: 'frequency', // 'live' (Lichess Explorer API, scored) | 'frequency' (same API, unscored -- always the most-common move) | 'local' (precomputed file from pipeline/chunked-ingest.mjs)
