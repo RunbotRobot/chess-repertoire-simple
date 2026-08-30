@@ -15,7 +15,7 @@ import { Chess } from './vendor/chess.esm.js';
 // devtools is actually running the latest code, and it also drives the
 // service worker's cache name (see sw.js) so updates actually take effect
 // instead of being served stale from the offline cache.
-export const APP_VERSION = 49;
+export const APP_VERSION = 50;
 
 const COLOR_OPTIONS = ['white', 'black'];
 const RATING_OPTIONS = ['1000', '1200', '1400', '1600', '1800', '2000', '2200', '2500'];
@@ -183,6 +183,19 @@ function renderLocalDataStatus() {
     : `${cap(color)}: not loaded yet`;
   el.textContent = `${describe('white', white)}. ${describe('black', black)}.`;
 }
+
+// The token field defaults to type=password so it isn't left plainly
+// visible on screen -- but with no way to reveal it, a pasted-and-saved
+// token became permanently unreadable/uncopyable from within the app
+// itself (a real report: a user couldn't retrieve their own already-set
+// token and had to generate a new one on Lichess). This toggle is the fix.
+$('#toggle-token-visibility')?.addEventListener('click', () => {
+  const input = $('#lichessToken');
+  const btn = $('#toggle-token-visibility');
+  const showing = input.type === 'text';
+  input.type = showing ? 'password' : 'text';
+  btn.textContent = showing ? 'Show' : 'Hide';
+});
 
 $('#refresh-local-data')?.addEventListener('click', async () => {
   const btn = $('#refresh-local-data');

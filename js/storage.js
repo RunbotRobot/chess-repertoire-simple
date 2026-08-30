@@ -22,8 +22,23 @@ function writeJSON(key, value) {
   }
 }
 
+// SHARED_LICHESS_TOKEN is deliberately committed, not a leaked secret: this
+// app is a small static site shared with a handful of friends so they can
+// try it with zero setup of their own -- no server, so there's nowhere to
+// hold a token except in the shipped client code, visible to anyone who
+// looks (page source, network tab, or just this file). Anyone who saves
+// their OWN token in Setup overwrites this in their own browser's
+// localStorage, which always wins over this default from then on -- see
+// loadSettings() below. If this one ever needs rotating (abuse, rate
+// limiting), replace it here and every visitor picks up the new one
+// automatically the next time they load the app fresh. Lichess tokens are
+// only ever shown once, at creation -- Setup's "Show" toggle next to the
+// token field exists so this one doesn't become unrecoverable the same way
+// the token it replaced did.
+const SHARED_LICHESS_TOKEN = 'lip_8ccll8VsXu5wOT4NijQY';
+
 export const DEFAULT_SETTINGS = {
-  dataSource: 'live',    // 'live' (Lichess Explorer API, scored) | 'frequency' (same API, unscored -- always the most-common move) | 'local' (precomputed file from pipeline/chunked-ingest.mjs)
+  dataSource: 'frequency', // 'live' (Lichess Explorer API, scored) | 'frequency' (same API, unscored -- always the most-common move) | 'local' (precomputed file from pipeline/chunked-ingest.mjs)
   localDataUrl: './data', // folder URL to fetch repertoire-white.json / repertoire-black.json from, when dataSource is 'local'
   colors: ['white', 'black'],
   ratingBands: ['1600', '1800', '2000'], // lichess explorer rating buckets to pool together
@@ -37,9 +52,9 @@ export const DEFAULT_SETTINGS = {
   dimScreenDuringQuiz: true,
   voiceURI: null,        // chosen SpeechSynthesis voice, if any
   speechRate: 0.95,
-  lichessToken: '',      // required as of the explorer API's OAuth requirement; see Setup
-  lastQuizColor: 'white',        // Quiz tab remembers your last picks and defaults to them next time
-  lastQuizInputMethod: 'voice',
+  lichessToken: SHARED_LICHESS_TOKEN, // shared default so a fresh visitor needs zero setup -- see the comment above
+  lastQuizColor: 'both',         // Quiz tab remembers your last picks and defaults to them next time
+  lastQuizInputMethod: 'manual',
 };
 
 export function loadSettings() {

@@ -164,8 +164,8 @@
       <div class="card">
         <h3>Repertoire data source</h3>
         <div class="row" id="dataSource-row">
-          <label class="chip"><input type="radio" name="dataSource" value="live" checked> Live (Lichess Explorer API)</label>
-          <label class="chip"><input type="radio" name="dataSource" value="frequency"> Frequency (most-common move, live)</label>
+          <label class="chip"><input type="radio" name="dataSource" value="live"> Live (Lichess Explorer API)</label>
+          <label class="chip"><input type="radio" name="dataSource" value="frequency" checked> Frequency (most-common move, live)</label>
           <label class="chip"><input type="radio" name="dataSource" value="local"> Local (precomputed file)</label>
         </div>
         <div class="field" id="localDataUrl-field" style="display:none;">
@@ -199,11 +199,15 @@
         <h3>Lichess account</h3>
         <div class="field">
           <label for="lichessToken">API token (required)</label>
-          <input type="password" id="lichessToken" placeholder="Paste your Lichess personal access token">
+          <div class="btn-row" style="align-items:stretch;">
+            <input type="password" id="lichessToken" placeholder="Paste your Lichess personal access token" style="flex:1;min-width:0;">
+            <button type="button" class="btn secondary" id="toggle-token-visibility">Show</button>
+          </div>
           <div class="hint">
             Lichess now requires being logged in to use the opening explorer. Create a free token at
             <strong>lichess.org/account/oauth/token/create</strong> — no scopes/permissions need to be checked,
-            just click Create — then paste it here. Stored only on this device.
+            just click Create — then paste it here. Stored only on this device. Lichess only ever shows a
+            token once, at creation — if you lose it, there's no way to recover it, only create a new one.
           </div>
         </div>
       </div>
@@ -325,13 +329,13 @@
           <span class="streak-badge" id="quiz-streak">🔥 0</span>
         </div>
         <div class="row">
-          <label class="chip"><input type="radio" name="quiz-color" value="white" checked> White</label>
+          <label class="chip"><input type="radio" name="quiz-color" value="white"> White</label>
           <label class="chip"><input type="radio" name="quiz-color" value="black"> Black</label>
-          <label class="chip"><input type="radio" name="quiz-color" value="both"> Both (random each line)</label>
+          <label class="chip"><input type="radio" name="quiz-color" value="both" checked> Both (random each line)</label>
         </div>
         <div class="row">
-          <label class="chip"><input type="radio" name="quiz-input" value="voice" checked> Voice, screen off</label>
-          <label class="chip"><input type="radio" name="quiz-input" value="manual"> Manual, on-screen — no audio</label>
+          <label class="chip"><input type="radio" name="quiz-input" value="voice"> Voice, screen off</label>
+          <label class="chip"><input type="radio" name="quiz-input" value="manual" checked> Manual, on-screen — no audio</label>
         </div>
         <div class="btn-row">
           <button class="btn btn-block" id="start-quiz">Start quiz</button>
