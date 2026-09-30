@@ -12,9 +12,12 @@ const PIECE_LETTERS = Object.fromEntries(Object.entries(PIECE_WORDS).map(([l, w]
 // of the actual chess term -- "knight" and "night" are pronounced
 // identically, and "night" is the far more common everyday word, so
 // engines frequently transcribe that instead even when "knight" was said.
-// Each of these normalizes to the same piece letter as its canonical word
-// above; never used for speech OUTPUT (sanToSpeech always says "knight").
-const PIECE_WORD_ALIASES = { night: 'N' };
+// "n ate"/"n eight": a reported real mis-hearing of "knight" split into two
+// tokens -- the leading consonant heard separately from the "-ight" rhyme,
+// which then got rendered as its own homophone ("ate"/"eight"). Each of
+// these normalizes to the same piece letter as its canonical word above;
+// never used for speech OUTPUT (sanToSpeech always says "knight").
+const PIECE_WORD_ALIASES = { night: 'N', 'n ate': 'N', 'n eight': 'N' };
 
 // The 95% Wilson score interval lower bound for a proportion — the
 // standard fix for "a small sample's raw rate can't be trusted at face
