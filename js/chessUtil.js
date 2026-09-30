@@ -8,6 +8,13 @@
 
 const PIECE_WORDS = { N: 'knight', B: 'bishop', R: 'rook', Q: 'queen', K: 'king' };
 const PIECE_LETTERS = Object.fromEntries(Object.entries(PIECE_WORDS).map(([l, w]) => [w, l]));
+// Homophones/common mis-transcriptions speech recognition produces instead
+// of the actual chess term -- "knight" and "night" are pronounced
+// identically, and "night" is the far more common everyday word, so
+// engines frequently transcribe that instead even when "knight" was said.
+// Each of these normalizes to the same piece letter as its canonical word
+// above; never used for speech OUTPUT (sanToSpeech always says "knight").
+const PIECE_WORD_ALIASES = { night: 'N' };
 
 // The 95% Wilson score interval lower bound for a proportion — the
 // standard fix for "a small sample's raw rate can't be trusted at face
@@ -146,7 +153,7 @@ export function normalizeSpokenMove(transcript) {
   if (/\b(castles?|castling)\b.*\bqueenside\b|\blong castle\b/.test(t)) return 'o-o-o';
   if (/\b(castles?|castling)\b.*\bkingside\b|\bshort castle\b/.test(t) || /^castles?$/.test(t.trim())) return 'o-o';
 
-  for (const [word, letter] of Object.entries(PIECE_LETTERS)) {
+  for (const [word, letter] of Object.entries({ ...PIECE_LETTERS, ...PIECE_WORD_ALIASES })) {
     t = t.replace(new RegExp('\\b' + word + '\\b', 'g'), letter.toLowerCase());
   }
   t = t.replace(/\bpawn\b/g, '');
